@@ -85,6 +85,14 @@
 
 <div id="partControls">
 
+  <div class="section">
+    <h3>ArUco連携</h3>
+    <label><input type="checkbox" id="arucoEnabled" checked
+      style="width: auto;"> マーカーの動きを反映する</label>
+    <p id="arucoStatus" class="note" role="status">接続準備中</p>
+    <p class="note">OFFにすると手動で調整できるよ。</p>
+  </div>
+
   <!-- 目 -->
   <div class="section">
 
@@ -386,6 +394,147 @@ const facePartStates = {};
 window.getFacePartStates = () => Object.fromEntries(
   Object.entries(facePartStates).map(([name, state]) => [name, { ...state }])
 );
+
+// ========================================
+// ArUco WebSocket設定（キャリブレーションはここで変更）
+// ========================================
+const arucoConfig = {
+  url: 'ws://127.0.0.1:8766',
+  // マーカーID → 既存の配置関数名
+  markerSetters: {
+    0: 'setEye01Coordinates',
+    1: 'setEye02Coordinates',
+    2: 'setMouthCoordinates'
+  },
+  // check.pyの正規化座標は下が0・上が1。中心0.5を顔の中心に合わせる。
+  centerX: 0.5,
+  centerY: 0.5,
+  scaleX: 1,
+  scaleY: 1,
+  offsetX: 0,
+  offsetY: 0,
+  flipX: false,
+  flipY: false,
+  rotationOffsetDeg: 0,
+  reconnectMs: 2000
+};
+
+const arucoEnabled = document.getElementById('arucoEnabled');
+const arucoStatus = document.getElementById('arucoStatus');
+const pendingArucoMarkers = new Map();
+let arucoSocket;
+let arucoReconnectTimer;
+let arucoStopped = false;
+let arucoConnected = false;
+let arucoFrameReceived = false;
+let arucoDetectedCount = 0;
+
+function updateArucoStatus() {
+  if (!arucoEnabled.checked) {
+    arucoStatus.textContent = '自動反映OFF：スライダーで調整できるよ';
+  } else if (!arucoConnected) {
+    arucoStatus.textContent = '未接続：Pythonの起動を待っているよ（手動操作OK）';
+  } else if (!arucoFrameReceived) {
+    arucoStatus.textContent = '接続済み：検出データを待っているよ';
+  } else {
+    arucoStatus.textContent = `受信中：対象マーカー ${arucoDetectedCount}個（未検出のパーツは最後の位置を維持）`;
+  }
+}
+
+function convertArucoMarker(marker) {
+  let x = (marker.x_norm - arucoConfig.centerX) * 2 * 0.75 * arucoConfig.scaleX;
+  let y = (marker.y_norm - arucoConfig.centerY) * 2 * 0.65 * arucoConfig.scaleY;
+  let rotation = marker.rotation_ccw_deg;
+  // 反転時は角度も同じ鏡映に合わせる。
+  if (arucoConfig.flipX) { x = -x; rotation = 180 - rotation; }
+  if (arucoConfig.flipY) { y = -y; rotation = -rotation; }
+  return {
+    x: THREE.MathUtils.clamp(x + arucoConfig.offsetX, -0.75, 0.75),
+    y: THREE.MathUtils.clamp(y + arucoConfig.offsetY, -0.65, 0.65),
+    rotation: rotation + arucoConfig.rotationOffsetDeg
+  };
+}
+
+function receiveArucoMessage(raw) {
+  let data;
+  try { data = JSON.parse(raw); } catch { return; }
+  if (!data || data.type !== 'aruco_frame' || !Array.isArray(data.markers)) return;
+  arucoFrameReceived = true;
+  const valid = new Map();
+  const duplicates = new Set();
+  for (const marker of data.markers) {
+    if (!marker || !Number.isInteger(marker.target_id) || marker.detected !== true ||
+        !Object.hasOwn(arucoConfig.markerSetters, marker.target_id) ||
+        ![marker.x_norm, marker.y_norm, marker.rotation_ccw_deg].every(Number.isFinite) ||
+        marker.x_norm < 0 || marker.x_norm > 1 || marker.y_norm < 0 || marker.y_norm > 1) continue;
+    if (valid.has(marker.target_id)) duplicates.add(marker.target_id);
+    valid.set(marker.target_id, marker);
+  }
+  for (const id of duplicates) valid.delete(id);
+  arucoDetectedCount = valid.size;
+  // 毎フレーム最新値だけを保持する。消失・重複時に古いデータを再適用しない。
+  pendingArucoMarkers.clear();
+  if (arucoEnabled.checked) {
+    for (const [id, marker] of valid) pendingArucoMarkers.set(id, convertArucoMarker(marker));
+    applyPendingArucoMarkers();
+  }
+  updateArucoStatus();
+}
+
+function applyPendingArucoMarkers() {
+  if (!arucoEnabled.checked) return;
+  for (const [id, state] of pendingArucoMarkers) {
+    const setter = window[arucoConfig.markerSetters[id]];
+    // GLBが読み込み中なら、配置関数が用意されるまで最新値を待たせる。
+    if (typeof setter !== 'function') continue;
+    setter(state.x, state.y, state.rotation);
+    pendingArucoMarkers.delete(id);
+  }
+}
+
+function connectAruco() {
+  if (arucoStopped) return;
+  try {
+    arucoSocket = new WebSocket(arucoConfig.url);
+  } catch {
+    updateArucoStatus();
+    arucoReconnectTimer = setTimeout(connectAruco, arucoConfig.reconnectMs);
+    return;
+  }
+  const socket = arucoSocket;
+  socket.addEventListener('open', () => {
+    if (socket !== arucoSocket || arucoStopped) return;
+    arucoConnected = true;
+    arucoFrameReceived = false;
+    updateArucoStatus();
+  });
+  socket.addEventListener('message', (event) => {
+    if (socket === arucoSocket && !arucoStopped) receiveArucoMessage(event.data);
+  });
+  socket.addEventListener('error', () => socket.close());
+  socket.addEventListener('close', () => {
+    if (socket !== arucoSocket) return;
+    arucoConnected = false;
+    pendingArucoMarkers.clear();
+    updateArucoStatus();
+    if (!arucoStopped) arucoReconnectTimer = setTimeout(connectAruco, arucoConfig.reconnectMs);
+  });
+}
+
+arucoEnabled.addEventListener('change', () => {
+  pendingArucoMarkers.clear();
+  updateArucoStatus();
+});
+window.addEventListener('pagehide', () => {
+  arucoStopped = true;
+  clearTimeout(arucoReconnectTimer);
+  if (arucoSocket) arucoSocket.close();
+});
+window.addEventListener('pageshow', () => {
+  if (arucoStopped) { arucoStopped = false; connectAruco(); }
+});
+updateArucoStatus();
+connectAruco();
 
 // ========================================
 // 頭足人を読み込む
@@ -1115,6 +1264,8 @@ window.addEventListener('resize', () => {
 function animate() {
 
   requestAnimationFrame(animate);
+
+  applyPendingArucoMarkers();
 
   controls.update();
 
