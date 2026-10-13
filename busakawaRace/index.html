@@ -123,6 +123,12 @@
     </div>
 
     <div class="controlRow">
+      <label for="eyeRotation">回転：<span id="eyeRotationValue">0</span>°</label>
+      <input type="range" id="eyeRotation"
+        min="-180" max="180" step="1" value="0">
+    </div>
+
+    <div class="controlRow">
       <label>
         浮き具合（固定）：
         <span id="eyeDepthValue">-0.10</span>
@@ -155,6 +161,12 @@
       <label>上下（Y）：<span id="eye02YValue">0.10</span></label>
       <input type="range" id="eye02Y"
         min="-0.65" max="0.65" step="0.01" value="0.1">
+    </div>
+
+    <div class="controlRow">
+      <label for="eye02Rotation">回転：<span id="eye02RotationValue">0</span>°</label>
+      <input type="range" id="eye02Rotation"
+        min="-180" max="180" step="1" value="0">
     </div>
 
     <div class="controlRow">
@@ -202,6 +214,12 @@
         step="0.01"
         value="-0.35"
       >
+    </div>
+
+    <div class="controlRow">
+      <label for="mouthRotation">回転：<span id="mouthRotationValue">0</span>°</label>
+      <input type="range" id="mouthRotation"
+        min="-180" max="180" step="1" value="0">
     </div>
 
     <div class="controlRow">
@@ -363,6 +381,12 @@ const partSettings = {
 };
 
 
+// 有効に配置できた状態だけを保持する。取得結果はコピーなので外部変更されない。
+const facePartStates = {};
+window.getFacePartStates = () => Object.fromEntries(
+  Object.entries(facePartStates).map(([name, state]) => [name, { ...state }])
+);
+
 // ========================================
 // 頭足人を読み込む
 // ========================================
@@ -447,21 +471,24 @@ loader.load(
       'eye_01',
       'eyeX',
       'eyeY',
-      null
+      null,
+      'eyeRotation'
     );
 
     loadFacePart(
       'eye_02',
       'eye02X',
       'eye02Y',
-      'eye02Depth'
+      'eye02Depth',
+      'eye02Rotation'
     );
 
     loadFacePart(
       'mouth_01',
       'mouthX',
       'mouthY',
-      'mouthDepth'
+      'mouthDepth',
+      'mouthRotation'
     );
 
   },
@@ -676,7 +703,8 @@ function loadFacePart(
   partName,
   xSliderId,
   ySliderId,
-  depthSliderId
+  depthSliderId,
+  rotationSliderId
 ) {
 
   const settings = partSettings[partName];
@@ -789,14 +817,27 @@ function loadFacePart(
         : null;
 
 
+      const rotationSlider = document.getElementById(rotationSliderId);
+      const state = { x: Number(xSlider.value), y: Number(ySlider.value), rotation: 0 };
+
+      function syncControls() {
+        xSlider.value = String(state.x);
+        ySlider.value = String(state.y);
+        rotationSlider.value = String(state.rotation);
+        document.getElementById(xSliderId + 'Value').textContent = state.x.toFixed(2);
+        document.getElementById(ySliderId + 'Value').textContent = state.y.toFixed(2);
+        document.getElementById(rotationSliderId + 'Value').textContent =
+          String(Number(state.rotation.toFixed(2)));
+      }
+
       // ========================================
       // ★ 位置・回転・埋め込み量を更新
       // ========================================
 
-      function updatePartPosition(x, y, depth = 0) {
+      function updatePartPosition(x, y, rotationDeg = state.rotation, depth = 0) {
 
         if (
-          ![x, y, depth].every(Number.isFinite)
+          ![x, y, rotationDeg, depth].every(Number.isFinite)
         ) {
           return false;
         }
@@ -890,9 +931,21 @@ function loadFacePart(
             offset
           );
 
-        partGroup.quaternion.copy(
-          orientation
+        // 曲面補正は0°の向きで計算し、角度だけで取り付け位置が動くのを防ぐ。
+        // qSurface * qLocalZ: ローカル+Zは合成後も頭の表面法線に一致する。
+        // 正の角度は正面から見て反時計回り。ArUcoの度数をそのまま使える。
+        const rotation = rotationDeg >= -180 && rotationDeg <= 180
+          ? rotationDeg
+          : ((rotationDeg % 360 + 540) % 360) - 180;
+        const localRotation = new THREE.Quaternion().setFromAxisAngle(
+          forward,
+          THREE.MathUtils.degToRad(rotation)
         );
+        partGroup.quaternion.copy(orientation).multiply(localRotation);
+
+        Object.assign(state, { x, y, rotation });
+        facePartStates[partName] = state;
+        syncControls();
 
         partGroup.visible = true;
 
@@ -905,11 +958,13 @@ function loadFacePart(
       // スライダーの値を反映
       // ========================================
 
-      function updateFromSliders() {
+      function updateFromSliders(event) {
 
-        const x = Number(xSlider.value);
-
-        const y = Number(ySlider.value);
+        // 外部入力後も、触っていない座標・角度はそのまま保持する。
+        const x = !event || event.target === xSlider ? Number(xSlider.value) : state.x;
+        const y = !event || event.target === ySlider ? Number(ySlider.value) : state.y;
+        const rotation = !event || event.target === rotationSlider
+          ? Number(rotationSlider.value) : state.rotation;
 
         const depth =
           settings.fixedDepth !== null
@@ -938,11 +993,9 @@ function loadFacePart(
         }
 
 
-        return updatePartPosition(
-          x,
-          y,
-          depth
-        );
+        const placed = updatePartPosition(x, y, rotation, depth);
+        if (!placed && facePartStates[partName]) syncControls();
+        return placed;
 
       }
 
@@ -961,6 +1014,8 @@ function loadFacePart(
         updateFromSliders
       );
 
+      rotationSlider.addEventListener('input', updateFromSliders);
+
       if (depthSlider) {
 
         depthSlider.addEventListener(
@@ -977,22 +1032,25 @@ function loadFacePart(
 
       if (partName === 'eye_01') {
 
-        window.setEyeCoordinates =
-          updatePartPosition;
+        window.setEye01Coordinates = (x, y, rotationDeg = state.rotation) =>
+          updatePartPosition(x, y, rotationDeg);
+        // 従来名も維持する。第3引数はこれから度数法の回転角度。
+        window.setEyeCoordinates = window.setEye01Coordinates;
 
       }
 
       if (partName === 'eye_02') {
 
-        // 計測側で座標変換後に呼ぶ。例: setEye02Coordinates(0.4, 0.1)
-        window.setEye02Coordinates = updatePartPosition;
+        // 計測側で座標変換後に呼ぶ。例: setEye02Coordinates(0.4, 0.1, -15)
+        window.setEye02Coordinates = (x, y, rotationDeg = state.rotation) =>
+          updatePartPosition(x, y, rotationDeg);
 
       }
 
       if (partName === 'mouth_01') {
 
-        window.setMouthCoordinates =
-          updatePartPosition;
+        window.setMouthCoordinates = (x, y, rotationDeg = state.rotation) =>
+          updatePartPosition(x, y, rotationDeg);
 
       }
 
