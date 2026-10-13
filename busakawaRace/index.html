@@ -416,12 +416,17 @@ const arucoConfig = {
   flipX: false,
   flipY: false,
   rotationOffsetDeg: 0,
+  lostGraceMs: 300,
   reconnectMs: 2000
 };
 
 const arucoEnabled = document.getElementById('arucoEnabled');
 const arucoStatus = document.getElementById('arucoStatus');
 const pendingArucoMarkers = new Map();
+// 座標・角度の状態とは分けて表示を管理する。モデルは作り直さない。
+const arucoPartGroups = new Map();
+const arucoLastSeen = new Map();
+const arucoPlacedParts = new Set();
 let arucoSocket;
 let arucoReconnectTimer;
 let arucoStopped = false;
@@ -429,15 +434,32 @@ let arucoConnected = false;
 let arucoFrameReceived = false;
 let arucoDetectedCount = 0;
 
+function updateArucoVisibility(now = performance.now()) {
+  for (const [setterName, group] of arucoPartGroups) {
+    const lastSeen = arucoLastSeen.get(setterName);
+    group.visible = !arucoEnabled.checked || (
+      arucoConnected && arucoPlacedParts.has(setterName) &&
+      lastSeen !== undefined && now - lastSeen < arucoConfig.lostGraceMs
+    );
+  }
+}
+
+function clearArucoTracking() {
+  pendingArucoMarkers.clear();
+  arucoLastSeen.clear();
+  arucoPlacedParts.clear();
+  updateArucoVisibility();
+}
+
 function updateArucoStatus() {
   if (!arucoEnabled.checked) {
     arucoStatus.textContent = '自動反映OFF：スライダーで調整できるよ';
   } else if (!arucoConnected) {
-    arucoStatus.textContent = '未接続：Pythonの起動を待っているよ（手動操作OK）';
+    arucoStatus.textContent = '未接続：パーツは非表示。自動反映OFFで手動操作できるよ';
   } else if (!arucoFrameReceived) {
     arucoStatus.textContent = '接続済み：検出データを待っているよ';
   } else {
-    arucoStatus.textContent = `受信中：対象マーカー ${arucoDetectedCount}個（未検出のパーツは最後の位置を維持）`;
+    arucoStatus.textContent = `受信中：対象マーカー ${arucoDetectedCount}個（未検出は0.3秒後に非表示）`;
   }
 }
 
@@ -475,9 +497,14 @@ function receiveArucoMessage(raw) {
   // 毎フレーム最新値だけを保持する。消失・重複時に古いデータを再適用しない。
   pendingArucoMarkers.clear();
   if (arucoEnabled.checked) {
-    for (const [id, marker] of valid) pendingArucoMarkers.set(id, convertArucoMarker(marker));
+    const now = performance.now();
+    for (const [id, marker] of valid) {
+      arucoLastSeen.set(arucoConfig.markerSetters[id], now);
+      pendingArucoMarkers.set(id, convertArucoMarker(marker));
+    }
     applyPendingArucoMarkers();
   }
+  updateArucoVisibility();
   updateArucoStatus();
 }
 
@@ -487,7 +514,15 @@ function applyPendingArucoMarkers() {
     const setter = window[arucoConfig.markerSetters[id]];
     // GLBが読み込み中なら、配置関数が用意されるまで最新値を待たせる。
     if (typeof setter !== 'function') continue;
-    setter(state.x, state.y, state.rotation);
+    const setterName = arucoConfig.markerSetters[id];
+    const lastSeen = arucoLastSeen.get(setterName);
+    if (!arucoConnected || lastSeen === undefined ||
+        performance.now() - lastSeen >= arucoConfig.lostGraceMs) {
+      pendingArucoMarkers.delete(id);
+      continue;
+    }
+    // 初回の再表示は、新しい計測姿勢を適用してから行う。
+    if (setter(state.x, state.y, state.rotation)) arucoPlacedParts.add(setterName);
     pendingArucoMarkers.delete(id);
   }
 }
@@ -506,6 +541,7 @@ function connectAruco() {
     if (socket !== arucoSocket || arucoStopped) return;
     arucoConnected = true;
     arucoFrameReceived = false;
+    clearArucoTracking();
     updateArucoStatus();
   });
   socket.addEventListener('message', (event) => {
@@ -515,18 +551,20 @@ function connectAruco() {
   socket.addEventListener('close', () => {
     if (socket !== arucoSocket) return;
     arucoConnected = false;
-    pendingArucoMarkers.clear();
+    clearArucoTracking();
     updateArucoStatus();
     if (!arucoStopped) arucoReconnectTimer = setTimeout(connectAruco, arucoConfig.reconnectMs);
   });
 }
 
 arucoEnabled.addEventListener('change', () => {
-  pendingArucoMarkers.clear();
+  clearArucoTracking();
   updateArucoStatus();
 });
 window.addEventListener('pagehide', () => {
   arucoStopped = true;
+  arucoConnected = false;
+  clearArucoTracking();
   clearTimeout(arucoReconnectTimer);
   if (arucoSocket) arucoSocket.close();
 });
@@ -1096,7 +1134,7 @@ function loadFacePart(
         facePartStates[partName] = state;
         syncControls();
 
-        partGroup.visible = true;
+        updateArucoVisibility();
 
         return true;
 
@@ -1185,6 +1223,7 @@ function loadFacePart(
           updatePartPosition(x, y, rotationDeg);
         // 従来名も維持する。第3引数はこれから度数法の回転角度。
         window.setEyeCoordinates = window.setEye01Coordinates;
+        arucoPartGroups.set('setEye01Coordinates', partGroup);
 
       }
 
@@ -1193,6 +1232,7 @@ function loadFacePart(
         // 計測側で座標変換後に呼ぶ。例: setEye02Coordinates(0.4, 0.1, -15)
         window.setEye02Coordinates = (x, y, rotationDeg = state.rotation) =>
           updatePartPosition(x, y, rotationDeg);
+        arucoPartGroups.set('setEye02Coordinates', partGroup);
 
       }
 
@@ -1200,6 +1240,7 @@ function loadFacePart(
 
         window.setMouthCoordinates = (x, y, rotationDeg = state.rotation) =>
           updatePartPosition(x, y, rotationDeg);
+        arucoPartGroups.set('setMouthCoordinates', partGroup);
 
       }
 
@@ -1266,6 +1307,7 @@ function animate() {
   requestAnimationFrame(animate);
 
   applyPendingArucoMarkers();
+  updateArucoVisibility();
 
   controls.update();
 
