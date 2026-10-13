@@ -10,37 +10,57 @@
       margin: 0;
       overflow: hidden;
       background: #eeeeee;
+      font-family: sans-serif;
     }
 
     #message {
       position: absolute;
       top: 20px;
       left: 20px;
-      font-family: sans-serif;
+      z-index: 10;
     }
 
-    #eyeControls {
+    #partControls {
       position: absolute;
       top: 60px;
       left: 20px;
-      background: white;
-      padding: 20px;
-      border-radius: 12px;
-      font-family: sans-serif;
-      z-index: 10;
       width: 220px;
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+      padding: 20px;
+      background: white;
+      border-radius: 12px;
+      z-index: 10;
     }
 
-    #eyeControls h3 {
+    #partControls h3 {
       margin-top: 0;
     }
 
-    #eyeControls input {
+    #partControls input {
       width: 100%;
     }
 
     .controlRow {
       margin-bottom: 15px;
+    }
+
+    .section {
+      margin-bottom: 24px;
+    }
+
+    .section + .section {
+      padding-top: 15px;
+      border-top: 1px solid #dddddd;
+    }
+
+    label {
+      font-size: 14px;
+    }
+
+    .note {
+      font-size: 12px;
+      color: #777777;
     }
   </style>
 
@@ -59,58 +79,153 @@
 
 <div id="message">読み込み中...</div>
 
-<!-- 目の位置調整 -->
-<div id="eyeControls">
+<!-- ========================================
+     パーツ調整UI
+======================================== -->
 
-  <h3>目の位置調整</h3>
+<div id="partControls">
 
-  <div class="controlRow">
-    <label>
-      左右（X）：
-      <span id="eyeXValue">-0.40</span>
-    </label>
+  <!-- 目 -->
+  <div class="section">
 
-    <input
-      type="range"
-      id="eyeX"
-      min="-0.75"
-      max="0.75"
-      step="0.01"
-      value="-0.4"
-    >
+    <h3>目の位置調整</h3>
+
+    <div class="controlRow">
+      <label>
+        左右（X）：
+        <span id="eyeXValue">-0.40</span>
+      </label>
+
+      <input
+        type="range"
+        id="eyeX"
+        min="-0.75"
+        max="0.75"
+        step="0.01"
+        value="-0.4"
+      >
+    </div>
+
+    <div class="controlRow">
+      <label>
+        上下（Y）：
+        <span id="eyeYValue">0.10</span>
+      </label>
+
+      <input
+        type="range"
+        id="eyeY"
+        min="-0.65"
+        max="0.65"
+        step="0.01"
+        value="0.1"
+      >
+    </div>
+
+    <div class="controlRow">
+      <label>
+        浮き具合（固定）：
+        <span id="eyeDepthValue">-0.10</span>
+      </label>
+
+      <input
+        type="range"
+        min="-0.15"
+        max="0.15"
+        step="0.01"
+        value="-0.10"
+        disabled
+      >
+    </div>
+
   </div>
 
-  <div class="controlRow">
-    <label>
-      上下（Y）：
-      <span id="eyeYValue">0.10</span>
-    </label>
+  <!-- 2つ目の目：計測済み座標の仮データを初期値にする -->
+  <div class="section">
 
-    <input
-      type="range"
-      id="eyeY"
-      min="-0.65"
-      max="0.65"
-      step="0.01"
-      value="0.1"
-    >
+    <h3>2つ目の目（eye_02）</h3>
+
+    <div class="controlRow">
+      <label>左右（X）：<span id="eye02XValue">0.40</span></label>
+      <input type="range" id="eye02X"
+        min="-0.75" max="0.75" step="0.01" value="0.4">
+    </div>
+
+    <div class="controlRow">
+      <label>上下（Y）：<span id="eye02YValue">0.10</span></label>
+      <input type="range" id="eye02Y"
+        min="-0.65" max="0.65" step="0.01" value="0.1">
+    </div>
+
+    <div class="controlRow">
+      <label>浮き具合（固定）：<span id="eye02DepthValue">-0.10</span></label>
+      <input type="range" id="eye02Depth"
+        min="-0.15" max="0.15" step="0.01" value="-0.10" disabled>
+    </div>
+
+    <p class="note">初期位置は計測済み座標の仮データ。X・Yで調整できるよ。</p>
+
   </div>
 
-  <div class="controlRow">
-    <label>
-      浮き具合（eye_01固定）：
-      <span id="eyeDepthValue">-0.10</span>
-    </label>
+  <!-- 口 -->
+  <div class="section">
 
-    <input
-      type="range"
-      id="eyeDepth"
-      min="-0.15"
-      max="0.15"
-      step="0.01"
-      value="-0.10"
-      disabled
-    >
+    <h3>口の位置調整</h3>
+
+    <div class="controlRow">
+      <label>
+        左右（X）：
+        <span id="mouthXValue">0.00</span>
+      </label>
+
+      <input
+        type="range"
+        id="mouthX"
+        min="-0.75"
+        max="0.75"
+        step="0.01"
+        value="0"
+      >
+    </div>
+
+    <div class="controlRow">
+      <label>
+        上下（Y）：
+        <span id="mouthYValue">-0.35</span>
+      </label>
+
+      <input
+        type="range"
+        id="mouthY"
+        min="-0.65"
+        max="0.65"
+        step="0.01"
+        value="-0.35"
+      >
+    </div>
+
+    <div class="controlRow">
+      <label>
+        浮き具合：
+        <span id="mouthDepthValue">0.00</span>
+      </label>
+
+      <input
+        type="range"
+        id="mouthDepth"
+        min="-0.20"
+        max="0.20"
+        step="0.01"
+        value="-0.10"
+        disabled
+       >
+    </div>
+
+    <p class="note">
+      マイナス：頭に埋め込む<br>
+      プラス：頭から浮かせる
+    </p>
+
   </div>
 
 </div>
@@ -120,9 +235,11 @@
 
 import * as THREE from 'three';
 
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFLoader } from
+  'three/addons/loaders/GLTFLoader.js';
 
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls } from
+  'three/addons/controls/OrbitControls.js';
 
 
 // ========================================
@@ -187,13 +304,63 @@ controls.enableDamping = true;
 
 
 // ========================================
-// モデル読み込み
+// 共通変数
 // ========================================
 
 const loader = new GLTFLoader();
 
+const message = document.getElementById('message');
+
 let character;
-let leftEye;
+
+let headRadius;
+let headCenter;
+let characterBox;
+let maxSize;
+
+let characterMeshes = [];
+
+const raycaster = new THREE.Raycaster();
+
+const rayDirection = new THREE.Vector3(0, 0, -1);
+
+const forward = new THREE.Vector3(0, 0, 1);
+
+let headMinY;
+
+
+// ========================================
+// パーツごとの設定
+// ========================================
+
+// 顔パーツごとのモデル・サイズ・固定沈み量。
+// 計測済みを想定した仮データ。実際のArUco計測値ではない。
+// X・Yはスライダーと同じ尺度へ変換済みの座標を使う。
+const measuredEye02Coordinates = { x: 0.4, y: 0.1 };
+
+const partSettings = {
+
+  eye_01: {
+    path: './assets/eyes/eye_01.glb',
+    sizeMultiplier: 0.48,
+    fixedDepth: -0.1
+  },
+
+  eye_02: {
+    path: './assets/eyes/eye_02.glb',
+    sizeMultiplier: 0.48,
+    fixedDepth: -0.1,
+    initialCoordinates: measuredEye02Coordinates
+  },
+
+  mouth_01: {
+  path: './assets/mouths/mouth_01.glb',
+  sizeMultiplier: 0.55,
+  fixedDepth: -0.1
+
+}
+
+};
 
 
 // ========================================
@@ -210,22 +377,16 @@ loader.load(
 
     scene.add(character);
 
+    characterBox =
+      new THREE.Box3().setFromObject(character);
 
-    // ========================================
-    // モデルの大きさ
-    // ========================================
+    const center =
+      characterBox.getCenter(new THREE.Vector3());
 
-    const box = new THREE.Box3().setFromObject(character);
+    const size =
+      characterBox.getSize(new THREE.Vector3());
 
-    const center = box.getCenter(
-      new THREE.Vector3()
-    );
-
-    const size = box.getSize(
-      new THREE.Vector3()
-    );
-
-    const maxSize = Math.max(
+    maxSize = Math.max(
       size.x,
       size.y,
       size.z
@@ -248,285 +409,59 @@ loader.load(
 
 
     // ========================================
-    // 頭の位置を推定
+    // 頭の位置
     // ========================================
 
-    const headRadius = Math.min(
+    headRadius = Math.min(
       size.x * 0.48,
       size.y * 0.34
     );
 
-    const headCenter = new THREE.Vector3(
+    headCenter = new THREE.Vector3(
       center.x,
-      box.max.y - headRadius,
+      characterBox.max.y - headRadius,
       center.z
     );
 
+    headMinY = headCenter.y - headRadius;
 
-    // 球の半径は既存のスライダーの尺度・目のサイズにだけ使う。
-    // 配置先は頭足人の実際のメッシュ表面から取得する。
-    const characterMeshes = [];
+
+    // ========================================
+    // メッシュを収集
+    // ========================================
+
     character.traverse((object) => {
-      if (object.isMesh) characterMeshes.push(object);
-    });
 
-    const raycaster = new THREE.Raycaster();
-    const rayDirection = new THREE.Vector3(0, 0, -1);
-    const forward = new THREE.Vector3(0, 0, 1);
-    const surfaceNormal = new THREE.Vector3();
-    const vertexA = new THREE.Vector3();
-    const vertexB = new THREE.Vector3();
-    const vertexC = new THREE.Vector3();
-    const edgeAB = new THREE.Vector3();
-    const edgeAC = new THREE.Vector3();
-    const clearance = maxSize * 0.001;
-    const headMinY = headCenter.y - headRadius;
-
-    function refreshCharacterMatrices() {
-      character.updateMatrixWorld(true);
-      characterMeshes.forEach((mesh) => {
-        if (mesh.isSkinnedMesh) mesh.skeleton.update();
-      });
-    }
-
-    function findHeadSurface(worldX, worldY) {
-      if (worldY < headMinY || worldY > box.max.y) return null;
-      raycaster.set(
-        new THREE.Vector3(worldX, worldY, box.max.z + maxSize),
-        rayDirection
-      );
-      raycaster.near = 0;
-      raycaster.far = size.z + maxSize * 2;
-      return raycaster.intersectObjects(characterMeshes, false)
-        .find((hit) => hit.face && hit.point.y >= headMinY) || null;
-    }
-
-    // ========================================
-    // 目のモデルを読み込む
-    // ========================================
-
-    loader.load(
-
-      './assets/eyes/eye_01.glb',
-
-      (eyeGltf) => {
-
-        leftEye = eyeGltf.scene;
-
-
-        // --------------------------------
-        // 目の元の大きさ
-        // --------------------------------
-
-        const eyeBox = new THREE.Box3().setFromObject(
-          leftEye
-        );
-
-        const eyeSize = eyeBox.getSize(
-          new THREE.Vector3()
-        );
-
-        const maxEyeSize = Math.max(
-          eyeSize.x,
-          eyeSize.y,
-          eyeSize.z
-        );
-
-        if (maxEyeSize <= 0) {
-
-          document.getElementById('message').textContent =
-            '目のモデルの大きさを取得できませんでした';
-
-          return;
-        }
-
-
-        // --------------------------------
-        // 目の大きさを調整
-        // --------------------------------
-
-        const targetEyeSize = headRadius * 0.48;
-
-        const scale = targetEyeSize / maxEyeSize;
-
-        leftEye.scale.multiplyScalar(scale);
-
-
-        // --------------------------------
-        // 目の中心を原点に合わせる
-        // --------------------------------
-
-        const scaledBox = new THREE.Box3().setFromObject(
-          leftEye
-        );
-
-        const eyeCenter = scaledBox.getCenter(
-          new THREE.Vector3()
-        );
-
-        const scaledEyeSize = scaledBox.getSize(
-          new THREE.Vector3()
-        );
-
-        leftEye.position.sub(eyeCenter);
-
-
-        // ========================================
-        // 目の位置調整用グループ
-        // ========================================
-
-        const eyeGroup = new THREE.Group();
-
-        eyeGroup.add(leftEye);
-
-        scene.add(eyeGroup);
-
-
-        // ========================================
-        // スライダー取得
-        // ========================================
-
-        const eyeXSlider = document.getElementById('eyeX');
-
-        const eyeYSlider = document.getElementById('eyeY');
-
-        const eyeDepthSlider = document.getElementById('eyeDepth');
-
-        // eye_01専用。既存スライダー尺度で内側へ0.1沈める。
-        const fixedEyeDepth = -0.1;
-
-
-        // ========================================
-        // ★ 目の位置・角度を更新する
-        // ========================================
-
-        // 中心合わせ後の取り付け原点から、目の後端までの距離。
-        eyeGroup.updateMatrixWorld(true);
-        const centeredEyeBox = new THREE.Box3().setFromObject(eyeGroup);
-        const rearDepth = Math.max(0, -centeredEyeBox.min.z);
-        const eyeHalfWidth = scaledEyeSize.x * 0.5;
-        const eyeHalfHeight = scaledEyeSize.y * 0.5;
-
-        // X・Yは既存スライダーと同じ尺度。ArUco側で座標を変換して渡せる。
-        // 成功ならtrue、未検出・不正入力ならfalse。最後の有効姿勢を維持する。
-        function updateEyePosition(x, y, depth = 0) {
-          if (![x, y, depth].every(Number.isFinite)) return false;
-
-          refreshCharacterMatrices();
-          const hit = findHeadSurface(
-            headCenter.x + headRadius * x,
-            headCenter.y + headRadius * y
-          );
-
-          if (!hit) {
-            document.getElementById('message').textContent =
-              'この位置には頭の表面がないよ。目は最後の有効位置を維持しているよ';
-            return false;
-          }
-
-          // getVertexPositionはSkinnedMeshのボーン変形も反映する。
-          // 変形済み三角形をワールド座標へ移し、その表面法線を求める。
-          const mesh = hit.object;
-          mesh.getVertexPosition(hit.face.a, vertexA).applyMatrix4(mesh.matrixWorld);
-          mesh.getVertexPosition(hit.face.b, vertexB).applyMatrix4(mesh.matrixWorld);
-          mesh.getVertexPosition(hit.face.c, vertexC).applyMatrix4(mesh.matrixWorld);
-          edgeAB.subVectors(vertexB, vertexA);
-          edgeAC.subVectors(vertexC, vertexA);
-          surfaceNormal.crossVectors(edgeAB, edgeAC);
-          if (surfaceNormal.lengthSq() < 1e-20) return false;
-          surfaceNormal.normalize();
-          if (surfaceNormal.dot(rayDirection) > 0) surfaceNormal.negate();
-
-          const orientation = new THREE.Quaternion()
-            .setFromUnitVectors(forward, surfaceNormal);
-
-          // 後端の面を覆う3×3点でも表面を確認し、曲面の盛り上がりを補正。
-          // 複雑な凹凸や輪郭の外では追加点の交点が得られないこともある。
-          let surfaceRise = 0;
-          const sampleOffset = new THREE.Vector3();
-          const sampleOrigin = new THREE.Vector3();
-          const sampleDirection = surfaceNormal.clone().negate();
-          for (let ix = -1; ix <= 1; ix++) {
-            for (let iy = -1; iy <= 1; iy++) {
-              sampleOffset.set(ix * eyeHalfWidth, iy * eyeHalfHeight, 0)
-                .applyQuaternion(orientation);
-              sampleOrigin.copy(hit.point).add(sampleOffset)
-                .addScaledVector(surfaceNormal, maxSize);
-              raycaster.set(sampleOrigin, sampleDirection);
-              raycaster.near = 0;
-              raycaster.far = maxSize * 2;
-              const sampleHit = raycaster.intersectObjects(characterMeshes, false)
-                .find((candidate) => candidate.point.y >= headMinY);
-              if (sampleHit) {
-                const rise = sampleHit.point.clone().sub(hit.point).dot(surfaceNormal);
-                surfaceRise = Math.max(surfaceRise, rise);
-              }
-            }
-          }
-
-          const minimumOffset = rearDepth + surfaceRise + clearance;
-          // eye_01の沈み量は、スライダーや外部入力に関係なく固定。
-          const offset = minimumOffset + headRadius * fixedEyeDepth;
-          eyeGroup.position.copy(hit.point).addScaledVector(surfaceNormal, offset);
-          eyeGroup.quaternion.copy(orientation);
-          eyeGroup.visible = true;
-          document.getElementById('message').textContent =
-            '目のX・Yを調整できるよ！eye_01の浮き具合は-0.1で固定しているよ';
-          return true;
-        }
-
-        function updateEyeFromSliders() {
-          const x = Number(eyeXSlider.value);
-          const y = Number(eyeYSlider.value);
-          const depth = fixedEyeDepth;
-          document.getElementById('eyeXValue').textContent = x.toFixed(2);
-          document.getElementById('eyeYValue').textContent = y.toFixed(2);
-          document.getElementById('eyeDepthValue').textContent = depth.toFixed(2);
-          return updateEyePosition(x, y, depth);
-        }
-
-        // 外部入力用。例: window.setEyeCoordinates(-0.4, 0.1)
-        // eye_01では第3引数を渡しても沈み量は-0.1で固定。
-        // ArUcoのピクセル座標は、呼び出し側でこのX・Y尺度へ変換する。
-        window.setEyeCoordinates = updateEyePosition;
-        eyeGroup.visible = false;
-
-        // ========================================
-        // スライダー操作
-        // ========================================
-
-        eyeXSlider.addEventListener(
-          'input',
-          updateEyeFromSliders
-        );
-
-        eyeYSlider.addEventListener(
-          'input',
-          updateEyeFromSliders
-        );
-
-        eyeDepthSlider.addEventListener(
-          'input',
-          updateEyeFromSliders
-        );
-
-
-        // 初期位置を設定
-        updateEyeFromSliders();
-
-      },
-
-      undefined,
-
-      (error) => {
-
-        console.error(error);
-
-        document.getElementById('message').textContent =
-          '目の読み込みに失敗しました';
-
+      if (object.isMesh) {
+        characterMeshes.push(object);
       }
 
+    });
+
+
+    // ========================================
+    // 顔パーツを読み込む
+    // ========================================
+
+    loadFacePart(
+      'eye_01',
+      'eyeX',
+      'eyeY',
+      null
+    );
+
+    loadFacePart(
+      'eye_02',
+      'eye02X',
+      'eye02Y',
+      'eye02Depth'
+    );
+
+    loadFacePart(
+      'mouth_01',
+      'mouthX',
+      'mouthY',
+      'mouthDepth'
     );
 
   },
@@ -537,12 +472,563 @@ loader.load(
 
     console.error(error);
 
-    document.getElementById('message').textContent =
+    message.textContent =
       '頭足人の読み込みに失敗しました';
 
   }
 
 );
+
+
+// ========================================
+// モデルの姿勢更新
+// ========================================
+
+function refreshCharacterMatrices() {
+
+  character.updateMatrixWorld(true);
+
+  characterMeshes.forEach((mesh) => {
+
+    if (mesh.isSkinnedMesh) {
+      mesh.skeleton.update();
+    }
+
+  });
+
+}
+
+
+// ========================================
+// 頭の実際の表面を探す
+// ========================================
+
+function findHeadSurface(worldX, worldY) {
+
+  if (
+    worldY < headMinY ||
+    worldY > characterBox.max.y
+  ) {
+    return null;
+  }
+
+  raycaster.set(
+
+    new THREE.Vector3(
+      worldX,
+      worldY,
+      characterBox.max.z + maxSize
+    ),
+
+    rayDirection
+
+  );
+
+  raycaster.near = 0;
+
+  raycaster.far =
+    characterBox.getSize(new THREE.Vector3()).z
+    + maxSize * 2;
+
+  const hits = raycaster.intersectObjects(
+    characterMeshes,
+    false
+  );
+
+  return hits.find(
+    (hit) =>
+      hit.face &&
+      hit.point.y >= headMinY
+  ) || null;
+
+}
+
+
+// ========================================
+// メッシュ表面の法線を取得
+// ========================================
+
+function getSurfaceNormal(hit) {
+
+  const mesh = hit.object;
+
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+
+  mesh.getVertexPosition(
+    hit.face.a,
+    a
+  ).applyMatrix4(mesh.matrixWorld);
+
+  mesh.getVertexPosition(
+    hit.face.b,
+    b
+  ).applyMatrix4(mesh.matrixWorld);
+
+  mesh.getVertexPosition(
+    hit.face.c,
+    c
+  ).applyMatrix4(mesh.matrixWorld);
+
+  const ab = new THREE.Vector3()
+    .subVectors(b, a);
+
+  const ac = new THREE.Vector3()
+    .subVectors(c, a);
+
+  const normal = new THREE.Vector3()
+    .crossVectors(ab, ac);
+
+  if (normal.lengthSq() < 1e-20) {
+    return null;
+  }
+
+  normal.normalize();
+
+  if (normal.dot(rayDirection) > 0) {
+    normal.negate();
+  }
+
+  return normal;
+
+}
+
+
+// ========================================
+// パーツ周辺の表面を確認
+// ========================================
+
+function calculateSurfaceRise(
+  hit,
+  normal,
+  orientation,
+  halfWidth,
+  halfHeight
+) {
+
+  let surfaceRise = 0;
+
+  const sampleDirection =
+    normal.clone().negate();
+
+  for (let ix = -1; ix <= 1; ix++) {
+
+    for (let iy = -1; iy <= 1; iy++) {
+
+      const sampleOffset =
+        new THREE.Vector3(
+          ix * halfWidth,
+          iy * halfHeight,
+          0
+        ).applyQuaternion(orientation);
+
+      const sampleOrigin =
+        hit.point.clone()
+          .add(sampleOffset)
+          .addScaledVector(normal, maxSize);
+
+      raycaster.set(
+        sampleOrigin,
+        sampleDirection
+      );
+
+      raycaster.near = 0;
+      raycaster.far = maxSize * 2;
+
+      const sampleHit =
+        raycaster.intersectObjects(
+          characterMeshes,
+          false
+        ).find(
+          (candidate) =>
+            candidate.point.y >= headMinY
+        );
+
+      if (sampleHit) {
+
+        const rise =
+          sampleHit.point.clone()
+            .sub(hit.point)
+            .dot(normal);
+
+        surfaceRise = Math.max(
+          surfaceRise,
+          rise
+        );
+
+      }
+
+    }
+
+  }
+
+  return surfaceRise;
+
+}
+
+
+// ========================================
+// ★ 顔パーツ共通の読み込み処理
+// ========================================
+
+function loadFacePart(
+  partName,
+  xSliderId,
+  ySliderId,
+  depthSliderId
+) {
+
+  const settings = partSettings[partName];
+
+  loader.load(
+
+    settings.path,
+
+    (gltf) => {
+
+      const part = gltf.scene;
+
+
+      // ========================================
+      // パーツのサイズを調整
+      // ========================================
+
+      const originalBox =
+        new THREE.Box3().setFromObject(part);
+
+      const originalSize =
+        originalBox.getSize(new THREE.Vector3());
+
+      const maxPartSize = Math.max(
+        originalSize.x,
+        originalSize.y,
+        originalSize.z
+      );
+
+      if (maxPartSize <= 0) {
+
+        message.textContent =
+          `${partName}の大きさを取得できませんでした`;
+
+        return;
+
+      }
+
+      const targetSize =
+        headRadius * settings.sizeMultiplier;
+
+      const scale =
+        targetSize / maxPartSize;
+
+      part.scale.multiplyScalar(scale);
+
+
+      // ========================================
+      // パーツの中心を原点にする
+      // ========================================
+
+      const scaledBox =
+        new THREE.Box3().setFromObject(part);
+
+      const partCenter =
+        scaledBox.getCenter(new THREE.Vector3());
+
+      const scaledSize =
+        scaledBox.getSize(new THREE.Vector3());
+
+      part.position.sub(partCenter);
+
+
+      // ========================================
+      // 配置用グループ
+      // ========================================
+
+      const partGroup = new THREE.Group();
+
+      partGroup.add(part);
+
+      scene.add(partGroup);
+
+      partGroup.visible = false;
+
+
+      // ========================================
+      // パーツの厚み
+      // ========================================
+
+      partGroup.updateMatrixWorld(true);
+
+      const centeredBox =
+        new THREE.Box3().setFromObject(partGroup);
+
+      const rearDepth = Math.max(
+        0,
+        -centeredBox.min.z
+      );
+
+      const halfWidth =
+        scaledSize.x * 0.5;
+
+      const halfHeight =
+        scaledSize.y * 0.5;
+
+
+      // ========================================
+      // スライダー取得
+      // ========================================
+
+      const xSlider =
+        document.getElementById(xSliderId);
+
+      const ySlider =
+        document.getElementById(ySliderId);
+
+      const depthSlider = depthSliderId
+        ? document.getElementById(depthSliderId)
+        : null;
+
+
+      // ========================================
+      // ★ 位置・回転・埋め込み量を更新
+      // ========================================
+
+      function updatePartPosition(x, y, depth = 0) {
+
+        if (
+          ![x, y, depth].every(Number.isFinite)
+        ) {
+          return false;
+        }
+
+        refreshCharacterMatrices();
+
+
+        // --------------------------------
+        // 実際の頭の表面を探す
+        // --------------------------------
+
+        const hit = findHeadSurface(
+
+          headCenter.x + headRadius * x,
+
+          headCenter.y + headRadius * y
+
+        );
+
+        if (!hit) {
+
+          message.textContent =
+            `${partName}：指定位置に頭の表面がありません`;
+
+          return false;
+
+        }
+
+
+        // --------------------------------
+        // 表面の向きを取得
+        // --------------------------------
+
+        const normal = getSurfaceNormal(hit);
+
+        if (!normal) {
+          return false;
+        }
+
+        const orientation =
+          new THREE.Quaternion()
+            .setFromUnitVectors(
+              forward,
+              normal
+            );
+
+
+        // --------------------------------
+        // 曲面による埋まり込みを補正
+        // --------------------------------
+
+        const surfaceRise =
+          calculateSurfaceRise(
+            hit,
+            normal,
+            orientation,
+            halfWidth,
+            halfHeight
+          );
+
+        const clearance = maxSize * 0.001;
+
+        const minimumOffset =
+          rearDepth +
+          surfaceRise +
+          clearance;
+
+
+        // --------------------------------
+        // パーツごとの埋め込み量
+        // --------------------------------
+
+        const actualDepth =
+          settings.fixedDepth !== null
+            ? settings.fixedDepth
+            : depth;
+
+        const offset =
+          minimumOffset +
+          headRadius * actualDepth;
+
+
+        // --------------------------------
+        // 位置と向きを反映
+        // --------------------------------
+
+        partGroup.position
+          .copy(hit.point)
+          .addScaledVector(
+            normal,
+            offset
+          );
+
+        partGroup.quaternion.copy(
+          orientation
+        );
+
+        partGroup.visible = true;
+
+        return true;
+
+      }
+
+
+      // ========================================
+      // スライダーの値を反映
+      // ========================================
+
+      function updateFromSliders() {
+
+        const x = Number(xSlider.value);
+
+        const y = Number(ySlider.value);
+
+        const depth =
+          settings.fixedDepth !== null
+            ? settings.fixedDepth
+            : Number(depthSlider?.value ?? 0);
+
+
+        // --------------------------------
+        // 数値表示
+        // --------------------------------
+
+        document.getElementById(
+          xSliderId + 'Value'
+        ).textContent = x.toFixed(2);
+
+        document.getElementById(
+          ySliderId + 'Value'
+        ).textContent = y.toFixed(2);
+
+        if (depthSliderId) {
+
+          document.getElementById(
+            depthSliderId + 'Value'
+          ).textContent = depth.toFixed(2);
+
+        }
+
+
+        return updatePartPosition(
+          x,
+          y,
+          depth
+        );
+
+      }
+
+
+      // ========================================
+      // スライダーイベント
+      // ========================================
+
+      xSlider.addEventListener(
+        'input',
+        updateFromSliders
+      );
+
+      ySlider.addEventListener(
+        'input',
+        updateFromSliders
+      );
+
+      if (depthSlider) {
+
+        depthSlider.addEventListener(
+          'input',
+          updateFromSliders
+        );
+
+      }
+
+
+      // ========================================
+      // 外部入力（将来のArUco用）
+      // ========================================
+
+      if (partName === 'eye_01') {
+
+        window.setEyeCoordinates =
+          updatePartPosition;
+
+      }
+
+      if (partName === 'eye_02') {
+
+        // 計測側で座標変換後に呼ぶ。例: setEye02Coordinates(0.4, 0.1)
+        window.setEye02Coordinates = updatePartPosition;
+
+      }
+
+      if (partName === 'mouth_01') {
+
+        window.setMouthCoordinates =
+          updatePartPosition;
+
+      }
+
+
+      // ========================================
+      // 初期配置
+      // ========================================
+
+      // 計測済み座標の仮データも、手動操作と同じ配置処理へ渡す。
+      if (settings.initialCoordinates) {
+        xSlider.value = String(settings.initialCoordinates.x);
+        ySlider.value = String(settings.initialCoordinates.y);
+      }
+
+      const placed = updateFromSliders();
+
+      if (placed) {
+        message.textContent = `${partName}を読み込みました！`;
+      }
+
+    },
+
+    undefined,
+
+    (error) => {
+
+      console.error(error);
+
+      message.textContent =
+        `${partName}の読み込みに失敗しました`;
+
+    }
+
+  );
+
+}
 
 
 // ========================================
