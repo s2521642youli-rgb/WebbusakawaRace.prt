@@ -413,7 +413,7 @@ const arucoConfig = {
   scaleY: 1,
   offsetX: 0,
   offsetY: 0,
-  flipX: false,
+  flipX: true,
   flipY: false,
   rotationOffsetDeg: 0,
   lostGraceMs: 300,
@@ -468,7 +468,7 @@ function convertArucoMarker(marker) {
   let y = (marker.y_norm - arucoConfig.centerY) * 2 * 0.65 * arucoConfig.scaleY;
   let rotation = marker.rotation_ccw_deg;
   // 反転時は角度も同じ鏡映に合わせる。
-  if (arucoConfig.flipX) { x = -x; rotation = 180 - rotation; }
+  if (arucoConfig.flipX) { x = -x; rotation = -rotation; }
   if (arucoConfig.flipY) { y = -y; rotation = -rotation; }
   return {
     x: THREE.MathUtils.clamp(x + arucoConfig.offsetX, -0.75, 0.75),
@@ -502,7 +502,7 @@ function receiveArucoMessage(raw) {
       arucoLastSeen.set(arucoConfig.markerSetters[id], now);
       pendingArucoMarkers.set(id, convertArucoMarker(marker));
     }
-    applyPendingArucoMarkers();
+    // 計算は描画時に最新値だけ反映する。受信イベント内でRaycasterを実行しない。
   }
   updateArucoVisibility();
   updateArucoStatus();
@@ -698,20 +698,63 @@ loader.load(
 // モデルの姿勢更新
 // ========================================
 
+let characterSurfaceRevision = 0;
+const meshSurfaceSnapshots = new WeakMap();
+
 function refreshCharacterMatrices() {
-
   character.updateMatrixWorld(true);
-
-  characterMeshes.forEach((mesh) => {
-
-    if (mesh.isSkinnedMesh) {
-      mesh.skeleton.update();
+  let changed = false;
+  for (const mesh of characterMeshes) {
+    if (mesh.isSkinnedMesh) mesh.skeleton.update();
+    const matrices = mesh.isSkinnedMesh ? mesh.skeleton.boneMatrices : null;
+    const morphs = mesh.morphTargetInfluences || [];
+    let snapshot = meshSurfaceSnapshots.get(mesh);
+    const geometry = mesh.geometry;
+    const positionVersion = geometry.attributes.position.version;
+    const indexVersion = geometry.index?.version;
+    const bindMatrices = mesh.isSkinnedMesh
+      ? [...mesh.bindMatrix.elements, ...mesh.bindMatrixInverse.elements] : [];
+    if (!snapshot || snapshot.bones.length !== (matrices?.length || 0) ||
+        snapshot.morphs.length !== morphs.length) {
+      snapshot = {
+        world: new Float64Array(16),
+        bones: new Float32Array(matrices?.length || 0),
+        morphs: new Float64Array(morphs.length),
+        bind: new Float64Array(bindMatrices.length)
+      };
+      meshSurfaceSnapshots.set(mesh, snapshot);
+      changed = true;
     }
-
-  });
-
+    if (snapshot.geometry !== geometry || snapshot.positionVersion !== positionVersion ||
+        snapshot.indexVersion !== indexVersion) changed = true;
+    snapshot.geometry = geometry;
+    snapshot.positionVersion = positionVersion;
+    snapshot.indexVersion = indexVersion;
+    const sources = [mesh.matrixWorld.elements, matrices || [], morphs, bindMatrices];
+    const targets = [snapshot.world, snapshot.bones, snapshot.morphs, snapshot.bind];
+    for (let n = 0; n < sources.length; n++) {
+      for (let i = 0; i < sources[n].length; i++) {
+        if (targets[n][i] !== sources[n][i]) changed = true;
+        targets[n][i] = sources[n][i];
+      }
+    }
+  }
+  if (changed) characterSurfaceRevision++;
 }
 
+// レイの交点配列と一時ベクトルは使い回し、毎回の小さな割り当てを減らす。
+const surfaceRayHits = [];
+const surfaceRayOrigin = new THREE.Vector3();
+const surfaceRaySize = new THREE.Vector3();
+const sampleDirection = new THREE.Vector3();
+const sampleOffset = new THREE.Vector3();
+const sampleOrigin = new THREE.Vector3();
+const sampleRiseVector = new THREE.Vector3();
+
+function intersectCharacterSurface() {
+  surfaceRayHits.length = 0;
+  return raycaster.intersectObjects(characterMeshes, false, surfaceRayHits);
+}
 
 // ========================================
 // 頭の実際の表面を探す
@@ -728,11 +771,7 @@ function findHeadSurface(worldX, worldY) {
 
   raycaster.set(
 
-    new THREE.Vector3(
-      worldX,
-      worldY,
-      characterBox.max.z + maxSize
-    ),
+    surfaceRayOrigin.set(worldX, worldY, characterBox.max.z + maxSize),
 
     rayDirection
 
@@ -741,13 +780,10 @@ function findHeadSurface(worldX, worldY) {
   raycaster.near = 0;
 
   raycaster.far =
-    characterBox.getSize(new THREE.Vector3()).z
+    characterBox.getSize(surfaceRaySize).z
     + maxSize * 2;
 
-  const hits = raycaster.intersectObjects(
-    characterMeshes,
-    false
-  );
+  const hits = intersectCharacterSurface();
 
   return hits.find(
     (hit) =>
@@ -823,24 +859,16 @@ function calculateSurfaceRise(
 
   let surfaceRise = 0;
 
-  const sampleDirection =
-    normal.clone().negate();
+  sampleDirection.copy(normal).negate();
 
   for (let ix = -1; ix <= 1; ix++) {
 
     for (let iy = -1; iy <= 1; iy++) {
 
-      const sampleOffset =
-        new THREE.Vector3(
-          ix * halfWidth,
-          iy * halfHeight,
-          0
-        ).applyQuaternion(orientation);
-
-      const sampleOrigin =
-        hit.point.clone()
-          .add(sampleOffset)
-          .addScaledVector(normal, maxSize);
+      sampleOffset.set(ix * halfWidth, iy * halfHeight, 0)
+        .applyQuaternion(orientation);
+      sampleOrigin.copy(hit.point).add(sampleOffset)
+        .addScaledVector(normal, maxSize);
 
       raycaster.set(
         sampleOrigin,
@@ -851,10 +879,7 @@ function calculateSurfaceRise(
       raycaster.far = maxSize * 2;
 
       const sampleHit =
-        raycaster.intersectObjects(
-          characterMeshes,
-          false
-        ).find(
+        intersectCharacterSurface().find(
           (candidate) =>
             candidate.point.y >= headMinY
         );
@@ -862,9 +887,7 @@ function calculateSurfaceRise(
       if (sampleHit) {
 
         const rise =
-          sampleHit.point.clone()
-            .sub(hit.point)
-            .dot(normal);
+          sampleRiseVector.subVectors(sampleHit.point, hit.point).dot(normal);
 
         surfaceRise = Math.max(
           surfaceRise,
@@ -1017,6 +1040,15 @@ function loadFacePart(
           String(Number(state.rotation.toFixed(2)));
       }
 
+      // パーツごとに直近1つのX・Yだけを保持し、履歴でメモリが増えないようにする。
+      const surfaceCache = {
+        x: NaN, y: NaN, revision: -1, valid: false,
+        point: new THREE.Vector3(), normal: new THREE.Vector3(),
+        orientation: new THREE.Quaternion(), minimumOffset: 0
+      };
+      const localRotation = new THREE.Quaternion();
+      let lastActualDepth;
+
       // ========================================
       // ★ 位置・回転・埋め込み量を更新
       // ========================================
@@ -1032,66 +1064,37 @@ function loadFacePart(
         refreshCharacterMatrices();
 
 
-        // --------------------------------
-        // 実際の頭の表面を探す
-        // --------------------------------
-
-        const hit = findHeadSurface(
-
-          headCenter.x + headRadius * x,
-
-          headCenter.y + headRadius * y
-
-        );
-
-        if (!hit) {
-
-          message.textContent =
-            `${partName}：指定位置に頭の表面がありません`;
-
-          return false;
-
-        }
-
-
-        // --------------------------------
-        // 表面の向きを取得
-        // --------------------------------
-
-        const normal = getSurfaceNormal(hit);
-
-        if (!normal) {
-          return false;
-        }
-
-        const orientation =
-          new THREE.Quaternion()
-            .setFromUnitVectors(
-              forward,
-              normal
-            );
-
-
-        // --------------------------------
-        // 曲面による埋まり込みを補正
-        // --------------------------------
-
-        const surfaceRise =
-          calculateSurfaceRise(
-            hit,
-            normal,
-            orientation,
-            halfWidth,
-            halfHeight
+        const surfaceChanged = surfaceCache.x !== x || surfaceCache.y !== y ||
+          surfaceCache.revision !== characterSurfaceRevision;
+        if (surfaceChanged) {
+          surfaceCache.x = x;
+          surfaceCache.y = y;
+          surfaceCache.revision = characterSurfaceRevision;
+          surfaceCache.valid = false;
+          const hit = findHeadSurface(
+            headCenter.x + headRadius * x,
+            headCenter.y + headRadius * y
           );
-
-        const clearance = maxSize * 0.001;
-
-        const minimumOffset =
-          rearDepth +
-          surfaceRise +
-          clearance;
-
+          if (!hit) {
+            message.textContent = `${partName}：指定位置に頭の表面がありません`;
+            return false;
+          }
+          const normal = getSurfaceNormal(hit);
+          if (!normal) return false;
+          surfaceCache.point.copy(hit.point);
+          surfaceCache.normal.copy(normal);
+          surfaceCache.orientation.setFromUnitVectors(forward, normal);
+          const surfaceRise = calculateSurfaceRise(
+            hit, normal, surfaceCache.orientation, halfWidth, halfHeight
+          );
+          surfaceCache.minimumOffset = rearDepth + surfaceRise + maxSize * 0.001;
+          surfaceCache.valid = true;
+        }
+        // 同じ無効位置の再受信も、最後の有効姿勢を残してレイ計算を省く。
+        if (!surfaceCache.valid) return false;
+        const normal = surfaceCache.normal;
+        const orientation = surfaceCache.orientation;
+        const minimumOffset = surfaceCache.minimumOffset;
 
         // --------------------------------
         // パーツごとの埋め込み量
@@ -1102,9 +1105,14 @@ function loadFacePart(
             ? settings.fixedDepth
             : depth;
 
-        const offset =
-          minimumOffset +
-          headRadius * actualDepth;
+        const rotation = rotationDeg >= -180 && rotationDeg <= 180
+          ? rotationDeg
+          : ((rotationDeg % 360 + 540) % 360) - 180;
+        // 同一の検出値なら、姿勢とUIの再書き込みも不要。
+        if (!surfaceChanged && state.x === x && state.y === y &&
+            state.rotation === rotation && lastActualDepth === actualDepth) return true;
+        const offset = minimumOffset + headRadius * actualDepth;
+        lastActualDepth = actualDepth;
 
 
         // --------------------------------
@@ -1112,7 +1120,7 @@ function loadFacePart(
         // --------------------------------
 
         partGroup.position
-          .copy(hit.point)
+          .copy(surfaceCache.point)
           .addScaledVector(
             normal,
             offset
@@ -1121,13 +1129,7 @@ function loadFacePart(
         // 曲面補正は0°の向きで計算し、角度だけで取り付け位置が動くのを防ぐ。
         // qSurface * qLocalZ: ローカル+Zは合成後も頭の表面法線に一致する。
         // 正の角度は正面から見て反時計回り。ArUcoの度数をそのまま使える。
-        const rotation = rotationDeg >= -180 && rotationDeg <= 180
-          ? rotationDeg
-          : ((rotationDeg % 360 + 540) % 360) - 180;
-        const localRotation = new THREE.Quaternion().setFromAxisAngle(
-          forward,
-          THREE.MathUtils.degToRad(rotation)
-        );
+        localRotation.setFromAxisAngle(forward, THREE.MathUtils.degToRad(rotation));
         partGroup.quaternion.copy(orientation).multiply(localRotation);
 
         Object.assign(state, { x, y, rotation });
