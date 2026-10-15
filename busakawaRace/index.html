@@ -41,6 +41,28 @@
       width: 100%;
     }
 
+    #characterActions button {
+      display: block;
+      width: 100%;
+      margin-bottom: 10px;
+      padding: 12px;
+      border: 1px solid #dddddd;
+      border-radius: 8px;
+      background: #ffffff;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    #characterActions #registerCharacter {
+      background: #ffdf83;
+      font-weight: bold;
+    }
+
+    #characterActions button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
     .controlRow {
       margin-bottom: 15px;
     }
@@ -84,6 +106,12 @@
 ======================================== -->
 
 <div id="partControls">
+
+  <div class="section" id="characterActions">
+    <button type="button" id="registerCharacter">この子を登録する！</button>
+    <button type="button" id="viewRanch">牧場を見る</button>
+    <p id="registrationStatus" role="status" aria-live="polite"></p>
+  </div>
 
   <div class="section">
     <h3>ArUco連携</h3>
@@ -394,6 +422,114 @@ const facePartStates = {};
 window.getFacePartStates = () => Object.fromEntries(
   Object.entries(facePartStates).map(([name, state]) => [name, { ...state }])
 );
+
+// ========================================
+// キャラクター登録（保存先の差し替えはcharacterRepositoryにまとめる）
+// ========================================
+const characterStorageKey = 'busakawaRace.characters.v1';
+const registerCharacterButton = document.getElementById('registerCharacter');
+const registrationStatus = document.getElementById('registrationStatus');
+
+function characterName(number) {
+  return `ぶさかわ${String(number).padStart(3, '0')}`;
+}
+
+const characterRepository = {
+  read() {
+    const raw = localStorage.getItem(characterStorageKey);
+    if (raw === null) return { schemaVersion: 1, nextNumber: 1, characters: [] };
+    let data;
+    try { data = JSON.parse(raw); } catch {
+      throw new Error('保存データを読み取れないよ。既存のデータは変更していないよ。');
+    }
+    if (!data || data.schemaVersion !== 1 || !Array.isArray(data.characters) ||
+        !Number.isSafeInteger(data.nextNumber) || data.nextNumber < 1) {
+      throw new Error('保存データの形式が違うため登録できないよ。既存のデータは残してあるよ。');
+    }
+    const used = new Set();
+    let maxNumber = 0;
+    for (const record of data.characters) {
+      if (!record || !Number.isSafeInteger(record.id) || record.id < 1 ||
+          record.name !== characterName(record.id) || used.has(record.id)) {
+        throw new Error('登録番号を確認できないよ。既存のデータは変更していないよ。');
+      }
+      used.add(record.id);
+      maxNumber = Math.max(maxNumber, record.id);
+    }
+    data.nextNumber = Math.max(data.nextNumber, maxNumber + 1);
+    return data;
+  },
+
+  async register(snapshot) {
+    // 同一オリジンの別タブとも排他制御する。取得待ち中も顔データは変化しない。
+    if (!navigator.locks?.request) {
+      throw new Error('このブラウザでは登録番号を安全に管理できないよ。localhostを対応ブラウザで開いてね。');
+    }
+    return navigator.locks.request(characterStorageKey, () => {
+      const data = this.read();
+      const number = data.nextNumber;
+      if (!Number.isSafeInteger(number + 1)) throw new Error('登録番号の上限に達したよ。');
+      const record = {
+        id: number,
+        name: characterName(number),
+        registeredAt: snapshot.registeredAt,
+        parts: JSON.parse(JSON.stringify(snapshot.parts))
+      };
+      data.characters.push(record);
+      data.nextNumber = number + 1;
+      // 番号と全レコードを1回で保存。容量不足ならどちらも更新されない。
+      localStorage.setItem(characterStorageKey, JSON.stringify(data));
+      return record;
+    });
+  }
+};
+
+function captureCharacterSnapshot() {
+  const bindings = {
+    eye_01: 'setEye01Coordinates',
+    eye_02: 'setEye02Coordinates',
+    mouth_01: 'setMouthCoordinates'
+  };
+  if (!character || Object.keys(bindings).some((part) => !facePartStates[part])) {
+    throw new Error('モデルを読み込み中だよ。読み込みが終わってから登録してね。');
+  }
+  // 0.3秒の検出猶予も含めた、クリックした瞬間の表示状態を記録する。
+  updateArucoVisibility();
+  const parts = {};
+  for (const [type, setterName] of Object.entries(bindings)) {
+    const state = facePartStates[type];
+    parts[type] = {
+      type,
+      x: state.x,
+      y: state.y,
+      rotation: state.rotation,
+      exists: arucoPartGroups.get(setterName)?.visible === true
+    };
+  }
+  return { registeredAt: new Date().toISOString(), parts };
+}
+
+registerCharacterButton.addEventListener('click', async () => {
+  if (registerCharacterButton.disabled) return;
+  registerCharacterButton.disabled = true;
+  try {
+    // 保存待ちの前にコピーする。その後のArUco操作と登録済みの顔は独立。
+    const snapshot = captureCharacterSnapshot();
+    const saved = await characterRepository.register(snapshot);
+    registrationStatus.textContent = `${saved.name}を登録しました！`;
+  } catch (error) {
+    registrationStatus.textContent = error instanceof Error &&
+      !['QuotaExceededError', 'SecurityError'].includes(error.name)
+      ? error.message
+      : '保存できなかったよ。ブラウザの保存設定や空き容量を確認してね。';
+  } finally {
+    registerCharacterButton.disabled = false;
+  }
+});
+
+document.getElementById('viewRanch').addEventListener('click', () => {
+  registrationStatus.textContent = '牧場は準備中！';
+});
 
 // ========================================
 // ArUco WebSocket設定（キャリブレーションはここで変更）
