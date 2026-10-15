@@ -14,6 +14,10 @@
     #pastureStatus { line-height: 1.6; margin: 0 0 14px; }
     a { display: inline-block; padding: 10px 16px; border-radius: 8px;
       background: #ffdf83; color: #304734; text-decoration: none; font-weight: bold; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    button { padding: 10px 16px; border: 0; border-radius: 8px; color: #304734; background: #bfe2bd; font: inherit; font-weight: bold; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    #resetCharacters { background: #e9a6a6; }
     .hint { margin: 12px 0 0; font-size: 12px; color: #617465; }
   </style>
   <script type="importmap">
@@ -30,6 +34,12 @@
     <h1>ぶさかわ牧場</h1>
     <p id="pastureStatus" role="status">牧場を準備しているよ…</p>
     <a href="./index.html">顔を作る</a>
+    <a href="./race.html">レースへ！</a>
+    <div class="actions">
+      <button id="gather" type="button" disabled>集合！</button>
+      <button id="dismiss" type="button" disabled>解散！</button>
+      <button id="resetCharacters" type="button">登録データをリセット</button>
+    </div>
     <p class="hint">クリックで名前を表示・地面をクリックで閉じる<br>ドラッグで見回す・スクロールで拡大縮小</p>
   </div>
   <script type="module">
@@ -65,6 +75,11 @@ controls.update();
 
 // index.htmlの保存形式・設定と同じ。保存済みデータは読み取りのみ。
 const storageKey = 'busakawaRace.characters.v1';
+document.getElementById('resetCharacters').addEventListener('click', () => {
+  if (!window.confirm('登録したぶさかわを全員削除します。\nこの操作は取り消せません。本当にリセットしますか？')) return;
+  try { localStorage.removeItem(storageKey); window.location.reload(); }
+  catch { status.textContent = '登録データを削除できなかったよ。ブラウザの保存設定を確認してね。'; }
+});
 const partSettings = {
   eye_01: { path: './assets/eyes/eye_01.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
   eye_02: { path: './assets/eyes/eye_02.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
@@ -104,6 +119,7 @@ let walkingReady = false;
 let sharedFootContacts;
 const rigContactIndexCache = new WeakMap();
 const calibratedRigContacts = new WeakMap();
+const gatherRadiusCache = new WeakMap();
 const randomBetween = (range) => range[0] + Math.random() * (range[1] - range[0]);
 
 
@@ -247,45 +263,21 @@ function makeNameLabel(name, maxSize) {
   canvas.width = 640;
   canvas.height = 160;
   const context = canvas.getContext('2d');
-
-  // 半透明の角丸ネームプレート
-  const left = 14, top = 12, width = 612, height = 136, radius = 46;
+  context.fillStyle = 'rgba(255,255,255,0.6)';
   context.beginPath();
-  context.moveTo(left + radius, top);
-  context.lineTo(left + width - radius, top);
-  context.quadraticCurveTo(left + width, top, left + width, top + radius);
-  context.lineTo(left + width, top + height - radius);
-  context.quadraticCurveTo(left + width, top + height, left + width - radius, top + height);
-  context.lineTo(left + radius, top + height);
-  context.quadraticCurveTo(left, top + height, left, top + height - radius);
-  context.lineTo(left, top + radius);
-  context.quadraticCurveTo(left, top, left + radius, top);
-  context.closePath();
-
-  context.fillStyle = 'rgba(255, 255, 255, 0.78)';
+  context.roundRect(14, 12, 612, 136, 46);
   context.fill();
-  context.strokeStyle = 'rgba(48, 71, 52, 0.14)';
-  context.lineWidth = 3;
-  context.stroke();
-
   context.fillStyle = '#304734';
   context.font = 'bold 52px sans-serif';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.fillText(name, canvas.width / 2, canvas.height / 2);
-
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-
-  const label = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: texture, transparent: true, depthWrite: false
-  }));
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
   label.scale.set(maxSize * 1.55, maxSize * 0.39, 1);
   label.name = 'registrationLabel';
-
-  // 普段は非表示
   label.visible = false;
-
   return label;
 }
 
@@ -298,6 +290,21 @@ function createPastureCharacter(record, templates) {
   modelSpace.add(character);
   const surface = createHeadSurface(character);
   const legRig = createLegRig(character, surface);
+  // 矩形の対角線ではなく実メッシュの水平投影から集合用の占有円を求める。
+  // 初期姿勢の測定をテンプレート単位で再利用し、足の動き用の余白を加える。
+  if(!gatherRadiusCache.has(templates.character)) {
+    let footprint=0;
+    const vertex=new THREE.Vector3();
+    character.traverse(mesh=>{
+      if(!mesh.isMesh) return;
+      for(let i=0;i<mesh.geometry.attributes.position.count;i++) {
+        mesh.getVertexPosition(i,vertex).applyMatrix4(mesh.matrixWorld);
+        footprint=Math.max(footprint,Math.hypot(vertex.x-surface.center.x,vertex.z-surface.center.z));
+      }
+    });
+    gatherRadiusCache.set(templates.character,footprint+surface.maxSize*.045);
+  }
+  const gatherRadius=gatherRadiusCache.get(templates.character);
   const parts = new Map();
   for (const slot of partSlots) {
     const saved = record.parts[slot];
@@ -319,7 +326,7 @@ function createPastureCharacter(record, templates) {
   group.add(label);
   const radius = Math.hypot(surface.size.x, surface.size.z) * 0.53;
   return { id: record.id, name: record.name, group, walkPivot, modelSpace,
-    character, parts, surface, label, radius, legRig,
+    character, parts, surface, label, radius, gatherRadius, legRig,
     behavior: {
       mode: 'free', state: 'idle', remaining: Math.random() * 1.8 + 0.2,
       heading: Math.random() * Math.PI * 2,
@@ -329,88 +336,267 @@ function createPastureCharacter(record, templates) {
   };
 }
 
-// ========================================
-// 名前札のクリック選択
-// ========================================
-
-// キャラクターのメッシュだけをクリック対象にする。
-// 地面や名前札はクリック対象に含めない。
-const selectionRaycaster = new THREE.Raycaster();
-const selectionPointer = new THREE.Vector2();
-const selectableMeshes = [];
-const ownerByMesh = new WeakMap();
-const pointerStart = new Map();
-let selectedCharacter = null;
-
-function registerSelectableCharacter(item) {
-  item.modelSpace.traverse((object) => {
-    if (!object.isMesh) return;
-    selectableMeshes.push(object);
-    ownerByMesh.set(object, item);
-  });
+// 集合・選択は表示だけの状態。登録データには書き込まない。
+let gathering = false, selectedCharacter = null;
+const gatherConfig = { speedMultiplier: 2, replanSeconds: 0.6, escapeSeconds: 1.5, yieldSeconds: 2 };
+let gatherFrame = 0;
+let formationHeading = 0;
+const gatherButton = document.getElementById('gather');
+const dismissButton = document.getElementById('dismiss');
+function refreshLabels() {
+  for (const item of pastureCharacters) item.label.visible = gathering
+    ? item.behavior.mode === 'arrived' : item === selectedCharacter;
 }
-
-function selectCharacter(item) {
-  if (selectedCharacter === item) return;
-
-  if (selectedCharacter) {
-    selectedCharacter.label.visible = false;
-  }
-
-  selectedCharacter = item;
-
-  if (selectedCharacter) {
-    selectedCharacter.label.visible = true;
-  }
-}
-
-function handlePastureClick(clientX, clientY) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-
-  selectionPointer.set(
-    ((clientX - rect.left) / rect.width) * 2 - 1,
-    -((clientY - rect.top) / rect.height) * 2 + 1
-  );
-
-  // 現在の歩行姿勢をクリック判定に反映
-  scene.updateMatrixWorld(true);
-  selectionRaycaster.setFromCamera(selectionPointer, camera);
-
-  const hits = selectionRaycaster.intersectObjects(selectableMeshes, false);
-
-  selectCharacter(
-    hits.length ? ownerByMesh.get(hits[0].object) || null : null
-  );
-}
-
-// ドラッグ操作をクリックと誤判定しないようにする
-renderer.domElement.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
-  pointerStart.set(event.pointerId, {
-    x: event.clientX,
-    y: event.clientY
-  });
+const pickRay = new THREE.Raycaster(), pickPoint = new THREE.Vector2();
+const pickMeshes = [], meshOwners = new WeakMap(), pointers = new Map();
+let dragged = false;
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (pointers.size) dragged = true;
+  else dragged = false;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 });
-
-renderer.domElement.addEventListener('pointerup', (event) => {
-  const start = pointerStart.get(event.pointerId);
-  pointerStart.delete(event.pointerId);
-
-  if (!start || event.button !== 0) return;
-
-  const distance = Math.hypot(
-    event.clientX - start.x,
-    event.clientY - start.y
-  );
-
-  if (distance > 7) return;
-
-  handlePastureClick(event.clientX, event.clientY);
+renderer.domElement.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (p && Math.hypot(e.clientX-p.x, e.clientY-p.y) > 7) dragged = true;
 });
-
-renderer.domElement.addEventListener('pointercancel', (event) => {
-  pointerStart.delete(event.pointerId);
+renderer.domElement.addEventListener('pointercancel', e => pointers.delete(e.pointerId));
+renderer.domElement.addEventListener('pointerup', e => {
+  const p = pointers.get(e.pointerId); pointers.delete(e.pointerId);
+  if (!p || dragged || e.button !== 0 || gathering) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  pickPoint.set((e.clientX-r.left)/r.width*2-1, -(e.clientY-r.top)/r.height*2+1);
+  scene.updateMatrixWorld(true); pickRay.setFromCamera(pickPoint, camera);
+  selectedCharacter = meshOwners.get(pickRay.intersectObjects(pickMeshes, false)[0]?.object) || null;
+  refreshLabels();
+});
+const gatherRadiusOf = item => item.gatherRadius ?? item.radius;
+const distanceXZ = (a,b) => Math.hypot(a.x-b.x, a.z-b.z);
+function turnTo(item, heading, dt) {
+  const d = Math.atan2(Math.sin(heading-item.group.rotation.y), Math.cos(heading-item.group.rotation.y));
+  item.group.rotation.y += THREE.MathUtils.clamp(d, -2.1*dt, 2.1*dt);
+  return Math.abs(d);
+}
+// 線分と他個体の円形占有領域を検査。待機中・到着済みの子も障害物に含める。
+function clearSegment(item, a, b) {
+  const vx=b.x-a.x, vz=b.z-a.z, length=vx*vx+vz*vz;
+  for (const other of pastureCharacters) {
+    if (other===item) continue;
+    const p=other.group.position;
+    const t=length ? THREE.MathUtils.clamp(((p.x-a.x)*vx+(p.z-a.z)*vz)/length,0,1) : 0;
+    const clearance=gatherRadiusOf(item)+gatherRadiusOf(other)+item.surface.maxSize*.035;
+    const closest=Math.hypot(a.x+t*vx-p.x,a.z+t*vz-p.z), initial=distanceXZ(a,p);
+    if (closest < clearance) {
+      // 自由歩行から集合へ切り替えた直後の狭い隙間では、離れる移動だけ許す。
+      if(initial>=clearance || closest<initial-1e-8 || distanceXZ(b,p)<=initial) return false;
+    }
+  }
+  return true;
+}
+// A*で回り道を探す。移動は常に歩行速度以内で、座標の瞬間移動はしない。
+function findRoute(item, goal) {
+  const start=item.group.position;
+  if (clearSegment(item,start,goal)) return [goal.clone()];
+  const h=Math.max(...pastureCharacters.map(c=>c.surface.maxSize));
+  const step=h*.3, pad=item.radius+h*.05;
+  const minX=walkBounds.minX+pad, maxX=walkBounds.maxX-pad;
+  const minZ=walkBounds.minZ+pad, maxZ=walkBounds.maxZ-pad;
+  const nx=Math.ceil((maxX-minX)/step), nz=Math.ceil((maxZ-minZ)/step);
+  const point=(x,z)=>new THREE.Vector3(minX+(maxX-minX)*x/nx,0,minZ+(maxZ-minZ)*z/nz);
+  const key=(x,z)=>z*(nx+1)+x;
+  const open=[], best=new Map(), closed=new Set();
+  // 接続できる近傍格子から開始。狭い隙間の斜めすり抜けは線分検査で防ぐ。
+  const sx=Math.round((start.x-minX)/(maxX-minX)*nx), sz=Math.round((start.z-minZ)/(maxZ-minZ)*nz);
+  for(let x=Math.max(0,sx-2);x<=Math.min(nx,sx+2);x++) for(let z=Math.max(0,sz-2);z<=Math.min(nz,sz+2);z++) {
+    const p=point(x,z);
+    if(!clearSegment(item,start,p)) continue;
+    const g=distanceXZ(start,p), n={x,z,p,g,f:g+distanceXZ(p,goal),parent:null};
+    open.push(n); best.set(key(x,z),g);
+  }
+  while(open.length) {
+    let index=0; for(let i=1;i<open.length;i++) if(open[i].f<open[index].f) index=i;
+    const n=open.splice(index,1)[0], k=key(n.x,n.z);
+    if(closed.has(k)) continue; closed.add(k);
+    if(distanceXZ(n.p,goal)<step*2 && clearSegment(item,n.p,goal)) {
+      const route=[goal.clone()]; for(let c=n;c;c=c.parent) route.push(c.p); route.reverse();
+      // 見通せる区間はまとめる。格子の角で細かく折り返さず、安全な最短の線分を辿る。
+      const smooth=[]; let from=start;
+      for(let i=0;i<route.length;) {
+        let next=route.length-1;
+        while(next>i && !clearSegment(item,from,route[next])) next--;
+        smooth.push(route[next]); from=route[next]; i=next+1;
+      }
+      return smooth;
+    }
+    for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++) {
+      if(!dx&&!dz) continue;
+      const x=n.x+dx,z=n.z+dz;
+      if(x<0||x>nx||z<0||z>nz||closed.has(key(x,z))) continue;
+      const p=point(x,z),g=n.g+distanceXZ(n.p,p);
+      if(g>=(best.get(key(x,z))??Infinity)||!clearSegment(item,n.p,p)) continue;
+      best.set(key(x,z),g); open.push({x,z,p,g,f:g+distanceXZ(p,goal),parent:n});
+    }
+  }
+  return null;
+}
+// 各個体が経路・速度・渋滞時間を所有する。経路探索の予算だけを共有し、移動は全員同時。
+function updateGather(dt) {
+  let planningBudget = 2;
+  const count = pastureCharacters.length;
+  gatherFrame++;
+  // 更新順を循環し、同じ個体ばかりが通行・再探索で優先されないようにする。
+  for (let index=0; index<count; index++) {
+    const item=pastureCharacters[(index+gatherFrame)%count];
+    const state=item.behavior, motion=state.gatherMotion, p=item.group.position;
+    const h=item.surface.maxSize;
+    if(state.mode==='arrived') {
+      turnTo(item,formationHeading,dt); updateWalkVisual(item,0,dt); continue;
+    }
+    motion.retry-=dt;
+    while(motion.route.length && distanceXZ(p,motion.route[0])<h*1e-6) motion.route.shift();
+    if(motion.waitFor!==undefined && !motion.route.length) {
+      const requester=pastureCharacters.find(other=>other.id===motion.waitFor);
+      if(requester && requester.behavior.mode!=='arrived') {
+        updateWalkVisual(item,0,dt); continue;
+      }
+      delete motion.waitFor; motion.noProgress=0; motion.stalled=0; motion.bestDistance=distanceXZ(p,state.goal);
+    }
+    if(!motion.route.length && distanceXZ(p,state.goal)<h*.015) {
+      state.mode='arrived'; motion.route=[];
+      // 同じフレームで別の子に道を譲る場合も、到着の通知を先に全待機個体へ届ける。
+      for(const waiting of pastureCharacters) {
+        const pending=waiting.behavior.gatherMotion;
+        if(pending.waitFor===item.id) {
+          delete pending.waitFor; pending.noProgress=0; pending.stalled=0;
+          pending.bestDistance=distanceXZ(waiting.group.position,waiting.behavior.goal);
+        }
+      }
+      turnTo(item,formationHeading,dt); updateWalkVisual(item,0,dt); continue;
+    }
+    // 動的な障害物で進めなくなった時だけA*を再実行。各経路は独立して保持する。
+    if((motion.stalled>.45 || motion.noProgress>gatherConfig.yieldSeconds) && motion.retry<=0 && planningBudget>0) {
+      planningBudget--; motion.retry=gatherConfig.replanSeconds+motion.variation*.3;
+      // 整列済みの列が入口を塞いだ場合も、その子自身の経路で一時的に道を譲る。
+      // 他の個体は移動を続けるので、単独通行の待ち行列にはしない。
+      let route=findRoute(item,motion.waitFor!==undefined && motion.route.length ? motion.route.at(-1) : state.goal);
+      if(!route && motion.noProgress>gatherConfig.yieldSeconds) {
+        for(const other of pastureCharacters) {
+          if(other.behavior.mode!=='arrived' || Math.min(distanceXZ(other.group.position,p),distanceXZ(other.group.position,state.goal))>h*2.2) continue;
+          const yielding=other.behavior.gatherMotion;
+          for(let attempt=0;attempt<48;attempt++) {
+            const angle=yielding.detour++*2.399963;
+            const target=other.group.position.clone().add(new THREE.Vector3(Math.sin(angle),0,Math.cos(angle)).multiplyScalar(h*(2+attempt*.2)));
+            if(target.x<walkBounds.minX+other.radius||target.x>walkBounds.maxX-other.radius||target.z<walkBounds.minZ+other.radius||target.z>walkBounds.maxZ-other.radius) continue;
+            if(pastureCharacters.some(c=>distanceXZ(c.behavior.goal,target)<gatherRadiusOf(other)+gatherRadiusOf(c)+h*.2)) continue;
+            const detour=clearSegment(other,other.group.position,target) ? [target] : null;
+            if(detour) { yielding.route=detour; yielding.stalled=0; yielding.retry=3; yielding.noProgress=0; yielding.waitFor=item.id; other.behavior.mode='gather'; motion.noProgress=0; break; }
+          }
+          if(motion.noProgress===0) break;
+        }
+      }
+      if(!route && motion.stalled>gatherConfig.escapeSeconds) {
+        // 正面衝突や袋小路では、一度横へ退いてから自分の整列位置へ再出発する。
+        for(let attempt=0;attempt<12 && !route;attempt++) {
+          const angle=motion.detour++*2.399963;
+          const target=p.clone().add(new THREE.Vector3(Math.sin(angle),0,Math.cos(angle)).multiplyScalar(h*(1.2+attempt*.15)));
+          if(target.x<walkBounds.minX+item.radius||target.x>walkBounds.maxX-item.radius||target.z<walkBounds.minZ+item.radius||target.z>walkBounds.maxZ-item.radius) continue;
+          route=findRoute(item,target);
+        }
+      }
+      if(route) { motion.route=route; motion.stalled=0; motion.noProgress=0; motion.bestDistance=distanceXZ(p,state.goal); }
+    }
+    while(motion.route.length && distanceXZ(p,motion.route[0])<h*1e-6) motion.route.shift();
+    const target=motion.route[0] || state.goal;
+    const remaining=distanceXZ(p,target), heading=Math.atan2(target.x-p.x,target.z-p.z);
+    const speed=state.speed*gatherConfig.speedMultiplier;
+    let best=null, bestScore=-Infinity;
+    // 安全な経路がある時はその線分を素直に辿り、近隣への過剰な迂回で振動しないようにする。
+    if(motion.route.length && clearSegment(item,p,target)) {
+      const step=Math.min(remaining,speed*dt);
+      best={next:p.clone().lerp(target,remaining ? step/remaining : 0),angle:heading,step}; bestScore=1;
+    } else {
+      // 予測した近隣との距離で減速・回避候補を評価。狭い所でも全員の候補を毎フレーム検討。
+      for(const offset of [0,.3,-.3,.65,-.65,1.05,-1.05,1.5,-1.5,2.1,-2.1,Math.PI]) {
+        for(const factor of [1,.45]) {
+          const angle=heading+offset, step=Math.min(remaining,speed*factor*dt);
+          const next=p.clone().add(new THREE.Vector3(Math.sin(angle)*step,0,Math.cos(angle)*step));
+          if(next.x<walkBounds.minX+item.radius||next.x>walkBounds.maxX-item.radius||next.z<walkBounds.minZ+item.radius||next.z>walkBounds.maxZ-item.radius) continue;
+          if(!clearSegment(item,p,next)) continue;
+          let crowd=0;
+          for(const other of pastureCharacters) {
+            if(other===item) continue;
+            const gap=distanceXZ(next,other.group.position)-gatherRadiusOf(item)-gatherRadiusOf(other);
+            crowd+=Math.max(0,h*.25-gap)/h;
+          }
+          const progress=(remaining-distanceXZ(next,target))/Math.max(speed*dt,1e-9);
+          const score=progress-crowd*.08 + Math.sin(offset)*motion.side*.01;
+          if(score>bestScore) { bestScore=score; best={next,angle,step}; }
+        }
+      }
+    }
+    let distance=0;
+    // 通常は目的地へ進む。渋滞中は横・後方への退避も許すが瞬間移動はしない。
+    if(best && (bestScore>0 || motion.stalled>.6)) {
+      turnTo(item,best.angle,dt);
+      distance=distanceXZ(p,best.next); p.copy(best.next);
+    } else turnTo(item,heading,dt);
+    motion.noProgress+=dt;
+    const goalDistance=distanceXZ(p,state.goal);
+    if(goalDistance<motion.bestDistance-h*.08) { motion.bestDistance=goalDistance; motion.noProgress=0; }
+    if(remaining-distanceXZ(p,target)>speed*dt*.08) { motion.stalled=0; }
+    else motion.stalled+=dt;
+    updateWalkVisual(item,distance,dt);
+  }
+  refreshLabels();
+  const arrived=pastureCharacters.filter(item=>item.behavior.mode==='arrived').length;
+  status.textContent=arrived===count ? `${arrived}体、集合できたよ！` : `集合中… ${arrived} / ${count}体が到着`;
+}
+gatherButton.addEventListener('click',()=>{
+  if(!walkingReady || gathering) return;
+  gathering=true; selectedCharacter=null; gatherFrame=0;
+  const n=pastureCharacters.length;
+  const h=Math.max(...pastureCharacters.map(c=>c.surface.maxSize));
+  const r=Math.max(...pastureCharacters.map(c=>c.radius));
+  // カメラの水平投影を正面として固定。集合後もOrbitControlsは自由に操作可能。
+  const front=camera.position.clone().sub(controls.target); front.y=0;
+  if(front.lengthSq()<1e-8) front.set(0,0,1); front.normalize();
+  formationHeading=Math.atan2(front.x,front.z);
+  const right=new THREE.Vector3(front.z,0,-front.x);
+  const columns=Math.min(5,Math.ceil(Math.sqrt(n))), rows=Math.ceil(n/columns);
+  const spacing=Math.max(h*1.3,r*2.2+h*.1); // ぶさかわの大きさに応じて間隔を調整
+  const halfWidth=(columns-1)*spacing/2, halfDepth=(rows-1)*spacing/2; // 集合後のぶさかわの占有領域
+  const extentX=Math.abs(right.x)*halfWidth+Math.abs(front.x)*halfDepth;
+  const extentZ=Math.abs(right.z)*halfWidth+Math.abs(front.z)*halfDepth;
+  const half=Math.max(walkBounds.maxX,walkBounds.maxZ,extentX+r+h*2,extentZ+r+h*2);
+  Object.assign(walkBounds,{minX:-half,maxX:half,minZ:-half,maxZ:half});
+  ground.scale.set(Math.max(ground.scale.x,half*2+h*2),Math.max(ground.scale.y,half*2+h*2),1);
+  const room=Math.max(0,Math.min((walkBounds.maxX-extentX-r)/Math.max(Math.abs(front.x),1e-6),(walkBounds.maxZ-extentZ-r)/Math.max(Math.abs(front.z),1e-6)));
+  const center=front.clone().multiplyScalar(Math.min(room*.6,h*2));
+  // 後列から前列へ。各行の人数に合わせて中央寄せ。
+  pastureCharacters.forEach((item,i)=>{
+    const row=Math.floor(i/columns), col=i%columns, count=Math.min(columns,n-row*columns);
+    item.behavior.goal=center.clone().addScaledVector(right,(col-(count-1)/2)*spacing).addScaledVector(front,(row-(rows-1)/2)*spacing);
+    item.behavior.mode='gather';
+    item.behavior.gatherMotion={route:[item.behavior.goal.clone()], retry:0, stalled:0, noProgress:0,
+      bestDistance:distanceXZ(item.group.position,item.behavior.goal), variation:Math.random(),
+      side:i%2 ? 1 : -1, detour:i*7};
+  });
+  const box=new THREE.Box3();
+  for(const item of pastureCharacters) {
+    box.expandByPoint(item.group.position); box.expandByPoint(item.behavior.goal);
+  }
+  box.expandByScalar(h*1.6); currentBounds=box; fitCamera(box);
+  const viewDistance=camera.position.distanceTo(controls.target);
+  camera.position.copy(controls.target).addScaledVector(front.clone().add(new THREE.Vector3(0,.75,0)).normalize(),viewDistance);
+  controls.update();
+  gatherButton.disabled=true; dismissButton.disabled=false; refreshLabels();
+});
+dismissButton.addEventListener('click',()=>{
+  gathering=false; selectedCharacter=null;
+  for(const item of pastureCharacters) {
+    Object.assign(item.behavior,{mode:'free',state:'walking',remaining:randomBetween(walkConfig.walkSeconds),heading:Math.random()*Math.PI*2});
+  }
+  refreshLabels(); gatherButton.disabled=false; dismissButton.disabled=true;
+  status.textContent=`${pastureCharacters.length}体のぶさかわが暮らしているよ`;
 });
 
 // GLTFLoaderはLeg.L等のピリオドを除去するので、両表記を受け付ける。
@@ -703,6 +889,7 @@ function updateFreeWalk(item, dt) {
 
 function updatePastureCharacters(dt) {
   if (!walkingReady || dt <= 0) return;
+  if (gathering) { updateGather(dt); return; }
   walkGrid.clear();
   for (const item of pastureCharacters) {
     const key = `${Math.floor(item.group.position.x / walkCellSize)},${Math.floor(item.group.position.z / walkCellSize)}`;
@@ -711,7 +898,7 @@ function updatePastureCharacters(dt) {
     bucket.push(item);
   }
   for (const item of pastureCharacters) {
-    // 次の段階の集合行動はここで切り替えられる。今回はfreeだけを実装する。
+    // 自由歩行では従来の境界・近隣回避を使用。
     if (item.behavior.mode === 'free') updateFreeWalk(item, dt);
     else updateWalkVisual(item, 0, dt);
   }
@@ -774,18 +961,16 @@ async function populatePasture() {
       [type, await loadTemplate(partSettings[type].path)])));
     for (let i = 0; i < records.length; i++) {
       const item = createPastureCharacter(records[i], { character, parts });
-
-      // この頭足人をクリックで選択できるようにする
-      registerSelectableCharacter(item);
-
       pastureCharacters.push(item);
       scene.add(item.group);
+      item.modelSpace.traverse(mesh => { if(mesh.isMesh) { pickMeshes.push(mesh); meshOwners.set(mesh,item); } });
       status.textContent = `${i + 1} / ${records.length}体を配置中…`;
       if (i % 4 === 3) await new Promise((resolve) => setTimeout(resolve, 0));
     }
     arrangeCharacters(pastureCharacters);
     currentBounds = initializeWalking(pastureCharacters);
     fitCamera(currentBounds);
+    gatherButton.disabled = false;
     status.textContent = `${pastureCharacters.length}体のぶさかわが暮らしているよ`;
   } catch (error) {
     console.error(error);
