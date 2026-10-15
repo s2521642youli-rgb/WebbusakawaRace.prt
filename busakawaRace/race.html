@@ -5,17 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ぶさかわレース</title>
 <style>
-body { margin:0; font-family:sans-serif; color:#304734; background:#dceef3; }
-header { padding:12px 18px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; background:#fff; }
+body { height:100dvh; display:flex; flex-direction:column; overflow:hidden; margin:0; font-family:sans-serif; color:#304734; background:#dceef3; }
+header { flex-shrink:0; padding:12px 18px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; background:#fff; }
 h1 { margin:0 12px 0 0; font-size:22px; }
 button,a { border:0; border-radius:7px; padding:10px 14px; font:inherit; font-weight:bold; background:#ffdf83; color:#304734; text-decoration:none; cursor:pointer; }
 button:disabled { opacity:.45; cursor:default; }
 #raceStatus { margin:0; flex-basis:100%; }
-#viewport { position:relative; height:calc(100dvh - 130px); min-height:280px; }
+#viewport { position:relative; flex:1; min-height:180px; }
 canvas { display:block; width:100%; height:100%; }
 #countdown { position:absolute; top:35%; width:100%; text-align:center; font-size:72px; font-weight:bold; pointer-events:none; text-shadow:0 2px 6px white; }
 #results { position:absolute; left:14px; bottom:14px; padding:10px 14px; background:rgba(255,255,255,.9); border-radius:8px; }
 #results h2 { margin:0 0 6px; font-size:18px; } #ranking { margin:0; padding-left:0; list-style:none; line-height:1.7; }
+#voting { flex-shrink:0; padding:8px 18px; background:#f4f6ee; }
+#voting h2 { font-size:16px; margin:0 0 6px; }
+#voteCards { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+.voteCard { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:7px; background:white; }
+.voteCard button { padding:7px 10px; }
+#voting.locked button { display:none; }
+#voting[hidden] { display:none; }
 </style>
   <script type="importmap">
   {
@@ -33,6 +40,10 @@ canvas { display:block; width:100%; height:100%; }
 <a href="./pasture.html">牧場に戻る</a>
 <p id="raceStatus" role="status">コースを準備しているよ…</p>
 </header>
+<section id="voting" hidden aria-label="出走キャラクターへの投票">
+<h2 id="voteHeading">この子、ぶさかわ！と思ったら投票してね</h2>
+<div id="voteCards"></div><button id="closeVoting" disabled>投票を締め切る</button>
+</section>
 <div id="viewport"><div id="countdown" role="status" aria-live="polite"></div>
 <section id="results" hidden><h2>レース結果</h2><ol id="ranking"></ol></section></div>
 <script type="module">
@@ -45,6 +56,11 @@ const status=document.getElementById('raceStatus');
 const startButton=document.getElementById('start'), retryButton=document.getElementById('retry');
 const countdown=document.getElementById('countdown'), results=document.getElementById('results');
 const ranking=document.getElementById('ranking'), viewport=document.getElementById('viewport');
+const votePanel=document.getElementById('voting'),voteCards=document.getElementById('voteCards');
+const voteHeading=document.getElementById('voteHeading'),closeVotingButton=document.getElementById('closeVoting');
+// 投票は一時状態のみ。登録済みキャラクターやlocalStorageには書き込まない。
+const voting={counts:new Map(),locked:null,views:new Map()};
+const votingRaceConfig={firstFinishSeconds:14,secondsPerRank:1.15};
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0xdceef3);
 const camera=new THREE.PerspectiveCamera(40,1,.01,1000);
 const renderer=new THREE.WebGLRenderer({antialias:true});
@@ -55,7 +71,7 @@ const controls=new OrbitControls(camera,renderer.domElement);
 controls.enableDamping=true;controls.maxPolarAngle=Math.PI*.48;
 const storageKey='busakawaRace.characters.v1';
 const racers=[];
-const race={state:'loading',countdownRemaining:3,elapsed:0,goRemaining:0,finishers:[]};
+const race={state:'loading',countdownRemaining:3,elapsed:0,goRemaining:0,finishers:[],plans:new Map()};
 const course={length:12,laneWidth:1.6,height:1};
 let sharedFootContacts;
 const rigContactIndexCache=new WeakMap(), calibratedRigContacts=new WeakMap();
@@ -606,14 +622,88 @@ function selectRaceEntrants(records, selectedIds=null) {
   const eligible=selectedIds ? selectedIds.map(id=>records.find(record=>record.id===id)).filter(Boolean) : [...records].sort((a,b)=>a.id-b.id);
   return [...new Map(eligible.map(record=>[record.id,record])).values()].slice(0,4);
 }
-// 仮速度。ぶさかわ度などの評価ができたら、この関数だけを差し替える。
-function determineRaceSpeed(record,lane,height) {
-  return height*.9*[1.00,1.04,.97,1.07][lane];
+// 集計・同順位判定は描画や走行から独立。競技順位（1位、1位、3位…）を使う。
+function tallyVotes(entrants,counts) {
+  const ordered=entrants.map(item=>({id:item.id,name:item.name,votes:counts.get(item.id)||0}))
+    .sort((a,b)=>b.votes-a.votes||a.id-b.id);
+  return ordered.map((item,index)=>({...item,rank:index>0&&item.votes===ordered[index-1].votes
+    ? ordered.findIndex(other=>other.votes===item.votes)+1 : index+1}));
+}
+function castVote(id) {
+  if(race.state!=='voting'||!voting.counts.has(id))return;
+  voting.counts.set(id,voting.counts.get(id)+1);refreshVoting();
+  status.textContent='投票受付中！投票が終わったら「投票を締め切る」を押してね。';
+}
+function refreshVoting() {
+  const open=race.state==='voting';
+  for(const [id,view] of voting.views) {
+    view.count.textContent=`${voting.counts.get(id)}票`;
+    view.button.disabled=!open;
+  }
+  closeVotingButton.disabled=!open;
+}
+function createVotingCards() {
+  voteCards.replaceChildren();voting.views.clear();
+  for(const item of racers) {
+    const row=document.createElement('div');row.className='voteCard';
+    const name=document.createElement('span');name.textContent=item.name;
+    const count=document.createElement('span');count.setAttribute('aria-live','polite');
+    const button=document.createElement('button');button.type='button';button.textContent='ぶさかわ！';
+    button.setAttribute('aria-label',`${item.name}にぶさかわ！`);
+    button.addEventListener('click',()=>castVote(item.id));
+    row.appendChild(name);row.appendChild(count);row.appendChild(button);voteCards.appendChild(row);
+    voting.views.set(item.id,{count,button});
+  }
+  refreshVoting();
+}
+function closeVoting() {
+  if(race.state!=='voting')return;
+  if(![...voting.counts.values()].some(count=>count>0)) {
+    status.textContent='まだ投票されていないよ。「ぶさかわ！」で投票してね。';return;
+  }
+  voting.locked=Object.freeze(tallyVotes(racers,voting.counts).map(item=>Object.freeze(item)));
+  race.plans=createRacePlans(voting.locked);race.state='ready';
+  votePanel.classList.add('locked');voteHeading.textContent='投票確定！この得票順位でゴールするよ';
+  refreshVoting();startButton.disabled=false;retryButton.disabled=false;
+  status.textContent='投票を締め切ったよ。「スタート！」でレース開始！';resize();
+}
+// 順位から目標到達時刻を作る。同票には完全に同じ時刻を割り当てる。
+// 今後の演出はこの制約を保つペース曲線として追加できる。集計や投票値は変更しない。
+function createRacePlans(standings,random=Math.random) {
+  return new Map(standings.map(item=>[item.id,Object.freeze({
+    targetTime:votingRaceConfig.firstFinishSeconds+(item.rank-1)*votingRaceConfig.secondsPerRank,
+    pulse:.34+random()*.12,phase:random()*Math.PI*2
+  })]));
+}
+// 正の滑らかな速度6u(1-u)*(1+pulse*sin(2πu+phase))を積分して正規化。
+// pulse<1なので逆走せず、始点/終点で速度0。途中のペースは毎レース変わるが到着時刻は厳守。
+function paceIntegral(u,plan) {
+  const k=Math.PI*2,angle=k*u+plan.phase;
+  const primitive=6*((u*u-u)*Math.cos(angle)/k+(1-2*u)*Math.sin(angle)/(k*k)-2*Math.cos(angle)/(k*k*k));
+  const origin=6*(Math.sin(plan.phase)/(k*k)-2*Math.cos(plan.phase)/(k*k*k));
+  return 3*u*u-2*u*u*u+plan.pulse*(primitive-origin);
+}
+function raceDistanceAt(plan,time,length=course.length) {
+  if(time<=0)return 0;
+  if(time>=plan.targetTime)return length;
+  const u=time/plan.targetTime;
+  // 丸め誤差だけで目標時刻より早くラインに触れないよう、ごく微小な余白を残す。
+  return length*THREE.MathUtils.clamp(paceIntegral(u,plan)/paceIntegral(1,plan),0,1-1e-12);
 }
 function currentRaceSpeed(item,time) {
-  // 仮のペース変動で抜きつ抜かれつを表現。基準値raceSpeedは各個体が保持する。
-  return item.raceSpeed*(1+.14*Math.sin(time*.9+item.lane*1.7));
+  const plan=race.plans.get(item.id),u=THREE.MathUtils.clamp(time/plan.targetTime,0,1);
+  return course.length/plan.targetTime*6*u*(1-u)*(1+plan.pulse*Math.sin(Math.PI*2*u+plan.phase))/paceIntegral(1,plan);
 }
+function actualStandings(finishers) {
+  const sorted=[...finishers].sort((a,b)=>a.finishTime-b.finishTime||a.id-b.id);
+  let rank=0,previous=-Infinity;
+  return sorted.map((item,index)=>{
+    if(Math.abs(item.finishTime-previous)>1e-7)rank=index+1;
+    previous=item.finishTime;
+    return {item,rank};
+  });
+}
+closeVotingButton.addEventListener('click',closeVoting);
 function buildCourse(height) {
   course.height=height;course.length=height*12;course.laneWidth=height*1.6;
   const width=course.laneWidth*4, material=color=>new THREE.MeshStandardMaterial({color,roughness:1});
@@ -634,10 +724,14 @@ function buildCourse(height) {
 }
 function frameCourse() {
   const height=course.height;
-  const box=new THREE.Box3(new THREE.Vector3(-course.laneWidth*2-height*1.6,0,-height*1.6),new THREE.Vector3(course.laneWidth*2+height*.8,height*1.8,course.length+height*1.6));
+  // 投票中は顔を見比べる視点。締め切り後はスタートとゴールを見渡す視点へ戻す。
+  const votingView=race.state==='voting';
+  const box=votingView
+    ? new THREE.Box3(new THREE.Vector3(-course.laneWidth*1.5-height*.9,0,-height*.65),new THREE.Vector3((racers.length-2.5)*course.laneWidth+height*.9,height*1.55,height*.8))
+    : new THREE.Box3(new THREE.Vector3(-course.laneWidth*2-height*1.6,0,-height*1.6),new THREE.Vector3(course.laneWidth*2+height*.8,height*1.8,course.length+height*1.6));
   const fov=THREE.MathUtils.degToRad(camera.fov);
   const tanVertical=Math.tan(fov/2),tanHorizontal=tanVertical*camera.aspect;
-  const direction=new THREE.Vector3(1,1.2,.35).normalize();
+  const direction=(votingView ? new THREE.Vector3(0,.22,1) : new THREE.Vector3(1,1.2,.35)).normalize();
   const right=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),direction).normalize();
   const up=new THREE.Vector3().crossVectors(direction,right);
   controls.target.copy(box.getCenter(new THREE.Vector3()));
@@ -653,30 +747,33 @@ function frameCourse() {
   controls.minDistance=height*4;controls.maxDistance=distance*2;controls.update();
 }
 function resetRace() {
-  race.state='ready';race.elapsed=0;race.countdownRemaining=3;race.goRemaining=0;race.finishers=[];
+  race.state='voting';race.plans.clear();voting.locked=null;voting.counts=new Map(racers.map(item=>[item.id,0]));race.elapsed=0;race.countdownRemaining=3;race.goRemaining=0;race.finishers=[];
   countdown.textContent='';results.hidden=true;ranking.replaceChildren();
   for(const item of racers) {
     item.group.position.set((item.lane-1.5)*course.laneWidth,0,0);item.group.rotation.set(0,0,0);
     item.finishTime=null;item.behavior.phase=item.lane*Math.PI*.37;item.behavior.weight=0;
     resetRunMotion(item);updateWalkVisual(item,0,0);item.label.visible=true;
   }
-  startButton.disabled=false;retryButton.disabled=false;
-  status.textContent=`${racers.length}体が出走するよ。「スタート！」で開始！`;
+  startButton.disabled=true;retryButton.disabled=true;
+  votePanel.hidden=false;votePanel.classList.remove('locked');
+  voteHeading.textContent='この子、ぶさかわ！と思ったら投票してね';createVotingCards();
+  status.textContent=`${racers.length}体が出走するよ。何度でも投票できるよ！`;resize();
 }
 function startRace() {
-  if(race.state!=='ready')return;
+  if(race.state!=='ready'||!voting.locked)return;
   race.state='countdown';race.countdownRemaining=3;countdown.textContent='3';
   results.hidden=true;startButton.disabled=true;retryButton.disabled=true;
   status.textContent='位置について…';
 }
 function showResults() {
   race.state='finished';results.hidden=false;retryButton.disabled=false;
-  race.finishers.sort((a,b)=>a.finishTime-b.finishTime||a.id-b.id);
   ranking.replaceChildren();
-  for(const [place,item] of race.finishers.entries()) {
-    const row=document.createElement('li');row.textContent=`${place+1}位　${item.name}`;ranking.appendChild(row);
+  for(const {item,rank} of actualStandings(race.finishers)) {
+    const row=document.createElement('li');
+    const votes=voting.locked.find(result=>result.id===item.id).votes;
+    row.textContent=`${rank}位　${item.name}　${votes}票`;ranking.appendChild(row);
   }
-  status.textContent='全員ゴール！「もう一度」で同じ出走者でもう一度走れるよ。';
+  status.textContent='全員ゴール！「もう一度」で投票からやり直せるよ。';
 }
 function updateRace(dt) {
   if(race.state==='countdown') {
@@ -691,13 +788,15 @@ function updateRace(dt) {
     for(const item of racers) {
       let distance=0;
       if(item.finishTime===null) {
-        const remaining=course.length-item.group.position.z;
-        const speed=currentRaceSpeed(item,begin+dt*.5);
-        distance=Math.min(remaining,speed*dt);
-        item.group.position.z+=distance;
-        if(distance>=remaining) {
-          // フレーム内の通過時刻で判定し、配列の更新順に順位が左右されないようにする。
-          item.finishTime=begin+remaining/speed;item.group.position.z=course.length;race.finishers.push(item);
+        const plan=race.plans.get(item.id);
+        const previous=item.group.position.z;
+        const next=raceDistanceAt(plan,begin+dt);
+        distance=Math.max(0,next-previous);item.group.position.z=next;
+        item.raceSpeed=currentRaceSpeed(item,begin+dt); // 実際の移動量と同じ速度曲線。将来の評価用にも保持。
+        if(previous<course.length && next>=course.length) {
+          // 単調な距離曲線が実際にラインを横切ったフレームで記録する。
+          // この曲線の到達時刻は解析的にtargetTime。補間誤差なく同票の同着も記録できる。
+          item.finishTime=plan.targetTime;race.finishers.push(item);
         }
       }
       updateWalkVisual(item,distance,dt);
@@ -724,7 +823,7 @@ async function populateRace() {
     const parts=new Map(await Promise.all([...required].map(async type=>[type,await loadTemplate(partSettings[type].path)])));
     for(const [lane,record] of records.entries()) {
       const item=createRaceCharacter(record,{character,parts});
-      item.lane=lane;item.raceSpeed=determineRaceSpeed(record,lane,item.surface.maxSize);item.finishTime=null;
+      item.lane=lane;item.raceSpeed=0;item.finishTime=null;
       racers.push(item);scene.add(item.group);
     }
     buildCourse(Math.max(...racers.map(item=>item.surface.maxSize)));resetRace();
