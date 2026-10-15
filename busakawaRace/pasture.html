@@ -87,13 +87,23 @@ const walkConfig = {
   rollRadians: 0.045,
   bobInHeights: 0.015,
   strideInHeights: 0.45,
-  maxDeltaSeconds: 0.05
+  maxDeltaSeconds: 0.05,
+  hipSwingRadians: 0.34,
+  kneeBendRadians: 0.45,
+  footLiftInHeights: 0.025,
+  rigStrideScale: 1,
+  rigRollRadians: 0.018,
+  rigBobInHeights: 0,
+  gaitBlendPerSecond: 12,
+  rigGroundClearanceInHeights: 0.0003
 };
 const walkBounds = { minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
 const walkGrid = new Map();
 let walkCellSize = 1;
 let walkingReady = false;
 let sharedFootContacts;
+const rigContactIndexCache = new WeakMap();
+const calibratedRigContacts = new WeakMap();
 const randomBetween = (range) => range[0] + Math.random() * (range[1] - range[0]);
 
 
@@ -260,6 +270,7 @@ function createPastureCharacter(record, templates) {
   const character = cloneWithSkeleton(templates.character);
   modelSpace.add(character);
   const surface = createHeadSurface(character);
+  const legRig = createLegRig(character, surface);
   const parts = new Map();
   for (const slot of partSlots) {
     const saved = record.parts[slot];
@@ -281,7 +292,7 @@ function createPastureCharacter(record, templates) {
   group.add(label);
   const radius = Math.hypot(surface.size.x, surface.size.z) * 0.53;
   return { id: record.id, name: record.name, group, walkPivot, modelSpace,
-    character, parts, surface, label, radius,
+    character, parts, surface, label, radius, legRig,
     behavior: {
       mode: 'free', state: 'idle', remaining: Math.random() * 1.8 + 0.2,
       heading: Math.random() * Math.PI * 2,
@@ -289,6 +300,149 @@ function createPastureCharacter(record, templates) {
       phase: Math.random() * Math.PI * 2, weight: 0, neighbors: []
     }
   };
+}
+
+// GLTFLoaderはLeg.L等のピリオドを除去するので、両表記を受け付ける。
+function createLegRig(character, surface) {
+  const bones = new Map();
+  const meshes = [];
+  character.traverse((object) => {
+    if (object.isBone) bones.set(object.name.replace(/[._\s-]/g, ''), object);
+    if (object.isSkinnedMesh) meshes.push(object);
+  });
+  const legs = [];
+  let reach = 0;
+  for (const side of ['L', 'R']) {
+    const hip = bones.get(`Leg${side}`), knee = bones.get(`Leg2${side}`), foot = bones.get(`Foot${side}`);
+    if (!hip || !knee || !foot || knee.parent !== hip || foot.parent !== knee) return null;
+    const makeJoint = (bone) => ({
+      bone,
+      rest: bone.quaternion.clone(),
+      delta: new THREE.Quaternion(),
+      // Blender由来のボーンのローカル軸に依存せず、モデルの左右軸で前後に振る。
+      axis: new THREE.Vector3(1, 0, 0).applyQuaternion(bone.getWorldQuaternion(new THREE.Quaternion()).invert())
+    });
+    reach += Math.abs(hip.getWorldPosition(new THREE.Vector3()).y - foot.getWorldPosition(new THREE.Vector3()).y);
+    legs.push({ side, hip: makeJoint(hip), knee: makeJoint(knee), foot: makeJoint(foot),
+      restPosition: hip.position.clone(),
+      up: new THREE.Vector3(0, 1, 0).applyQuaternion(hip.parent.getWorldQuaternion(new THREE.Quaternion()).invert()) });
+  }
+  if (!meshes.length) return null;
+  const contacts = [];
+  const vertex = new THREE.Vector3();
+  for (const mesh of meshes) {
+    let cached = rigContactIndexCache.get(mesh.geometry);
+    if (!cached) {
+      cached = [];
+      const indices = mesh.geometry.attributes.skinIndex;
+      const weights = mesh.geometry.attributes.skinWeight;
+      if (!indices || !weights) return null;
+      for (const leg of legs) {
+        const footIndex = mesh.skeleton.bones.indexOf(leg.foot.bone);
+        const points = [];
+        for (let i = 0; i < indices.count; i++) {
+          let footWeight = 0;
+          for (let k = 0; k < 4; k++) if (indices.getComponent(i, k) === footIndex) footWeight += weights.getComponent(i, k);
+          if (footWeight < 0.5) continue;
+          mesh.getVertexPosition(i, vertex).applyMatrix4(mesh.matrixWorld);
+          if (vertex.y <= surface.box.min.y + surface.maxSize * 0.07) points.push({ x: vertex.x, y: vertex.y, index: i, blended: footWeight < 0.99999 });
+        }
+        // 足首の逆回転で足裏の向きが保たれるため、足裏のXY凸包が接地判定に使える。
+        points.sort((a, b) => a.x - b.x || a.y - b.y);
+        const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        const lower = [], upper = [];
+        for (const point of points) {
+          while (lower.length > 1 && cross(lower.at(-2), lower.at(-1), point) <= 0) lower.pop();
+          lower.push(point);
+        }
+        for (let i = points.length - 1; i >= 0; i--) {
+          const point = points[i];
+          while (upper.length > 1 && cross(upper.at(-2), upper.at(-1), point) <= 0) upper.pop();
+          upper.push(point);
+        }
+        if (points.length < 2) return null;
+        lower.pop(); upper.pop();
+        // 混合ウェイトの頂点は骨の逆回転でも変形するため、凸包から省かない。
+        const sampleIndices = new Set(lower.concat(upper).map((point) => point.index));
+        for (const point of points) if (point.blended) sampleIndices.add(point.index);
+        for (const index of sampleIndices) cached.push(index);
+      }
+      rigContactIndexCache.set(mesh.geometry, cached);
+    }
+    const selected = calibratedRigContacts.get(mesh.geometry) || cached;
+    for (const index of selected) contacts.push({ mesh, index });
+  }
+  // 1周期の前後ストロークと実際の移動距離を揃え、足滑りを抑える。
+  const strideLength = reach * 0.5 * 4 * Math.sin(walkConfig.hipSwingRadians) * walkConfig.rigStrideScale;
+  if (!contacts.length || strideLength <= 0) return null;
+  const rig = { legs, meshes, contacts, vertex, strideLength };
+  if (contacts.length > 160) calibrateRigContactSamples(character, rig, surface);
+  return rig;
+}
+
+function applyLegPose(rig, phase, weight, maxSize) {
+  for (let i = 0; i < rig.legs.length; i++) {
+    const leg = rig.legs[i];
+    const legPhase = phase + i * Math.PI;
+    const swing = Math.max(0, Math.cos(legPhase));
+    const hip = -Math.sin(legPhase) * walkConfig.hipSwingRadians * weight;
+    const knee = swing * swing * walkConfig.kneeBendRadians * weight;
+    setJointAngle(leg.hip, hip);
+    setJointAngle(leg.knee, knee);
+    setJointAngle(leg.foot, -hip - knee);
+    leg.hip.bone.position.copy(leg.restPosition).addScaledVector(leg.up,
+      swing * swing * maxSize * walkConfig.footLiftInHeights * weight);
+  }
+}
+
+function setJointAngle(joint, angle) {
+  joint.delta.setFromAxisAngle(joint.axis, angle);
+  joint.bone.quaternion.copy(joint.rest).multiply(joint.delta);
+}
+
+function calibrateRigContactSamples(character, rig, surface) {
+  // 混合ウェイトの候補から歩行1周期・複数のブレンド量で最下点になる頂点を選ぶ。
+  // GLBの種類ごとに初回だけ行い、各個体は同じ頂点番号と独立した骨を使う。
+  const selected = new Set();
+  for (const weight of [0, 0.25, 0.5, 0.75, 1]) {
+    for (let sample = 0; sample < 64; sample++) {
+      const phase = sample / 64 * Math.PI * 2;
+      applyLegPose(rig, phase, weight, surface.maxSize);
+      character.updateMatrixWorld(true);
+      for (const mesh of rig.meshes) mesh.skeleton.update();
+      const roll = Math.sin(phase) * walkConfig.rigRollRadians * weight;
+      const sin = Math.sin(roll), cos = Math.cos(roll);
+      let minimum = Infinity, lowest;
+      for (const contact of rig.contacts) {
+        contact.mesh.getVertexPosition(contact.index, rig.vertex).applyMatrix4(contact.mesh.matrixWorld);
+        const y = (rig.vertex.x - surface.center.x) * sin + (rig.vertex.y - surface.box.min.y) * cos;
+        if (y < minimum) { minimum = y; lowest = contact; }
+      }
+      if (lowest) selected.add(lowest);
+    }
+  }
+  applyLegPose(rig, 0, 0, surface.maxSize);
+  character.updateMatrixWorld(true);
+  for (const mesh of rig.meshes) mesh.skeleton.update();
+  rig.contacts = [...selected];
+  for (const mesh of rig.meshes) {
+    calibratedRigContacts.set(mesh.geometry, rig.contacts.filter((c) => c.mesh === mesh).map((c) => c.index));
+  }
+}
+
+function rigGroundHeight(item) {
+  // 脚の新しい姿勢を反映して、少数の足裏頂点だけをスキニングする。
+  // 体と顔の親グループを一緒に補正し、頭の骨Bodyには手を加えない。
+  item.walkPivot.position.y = 0;
+  item.group.updateMatrixWorld(true);
+  const rig = item.legRig;
+  for (const mesh of rig.meshes) mesh.skeleton.update();
+  let footY = Infinity;
+  for (const contact of rig.contacts) {
+    contact.mesh.getVertexPosition(contact.index, rig.vertex).applyMatrix4(contact.mesh.matrixWorld);
+    footY = Math.min(footY, rig.vertex.y);
+  }
+  return Number.isFinite(footY) ? -footY + item.surface.maxSize * walkConfig.rigGroundClearanceInHeights : 0;
 }
 
 // 足付近の頂点を初回だけ調べ、XY平面の凸包に絞る。
@@ -356,19 +510,28 @@ function gatherWalkNeighbors(item) {
 
 function updateWalkVisual(item, distance, dt) {
   const state = item.behavior;
-  if (distance > 0) state.phase = (state.phase + distance /
-    (item.surface.maxSize * walkConfig.strideInHeights) * Math.PI * 2) % (Math.PI * 2);
-  const blend = 1 - Math.exp(-12 * dt);
+  const stride = item.legRig?.strideLength || item.surface.maxSize * walkConfig.strideInHeights;
+  if (distance > 0) state.phase = (state.phase + distance / stride * Math.PI * 2) % (Math.PI * 2);
+  const blend = 1 - Math.exp(-walkConfig.gaitBlendPerSecond * dt);
   state.weight += ((distance > 0 ? 1 : 0) - state.weight) * blend;
   if (state.weight < 0.001) state.weight = 0;
-  const roll = Math.sin(state.phase) * walkConfig.rollRadians * state.weight;
+  const rollAmount = item.legRig ? walkConfig.rigRollRadians : walkConfig.rollRadians;
+  const bobAmount = item.legRig ? walkConfig.rigBobInHeights : walkConfig.bobInHeights;
+  const roll = Math.sin(state.phase) * rollAmount * state.weight;
   item.walkPivot.rotation.z = roll;
-  let footY = Infinity;
-  const sin = Math.sin(roll), cos = Math.cos(roll);
-  for (const point of sharedFootContacts) footY = Math.min(footY, point.x * sin + point.y * cos);
-  const bob = (1 - Math.cos(state.phase * 2)) * 0.5 * item.surface.maxSize *
-    walkConfig.bobInHeights * state.weight;
-  item.walkPivot.position.y = (Number.isFinite(footY) ? -footY : 0) + bob;
+  let groundHeight;
+  if (item.legRig) {
+    applyLegPose(item.legRig, state.phase, state.weight, item.surface.maxSize);
+    groundHeight = rigGroundHeight(item);
+  } else {
+    // 対応するリグがないモデルでは従来の全体揺れを維持する。
+    let footY = Infinity;
+    const sin = Math.sin(roll), cos = Math.cos(roll);
+    for (const point of sharedFootContacts) footY = Math.min(footY, point.x * sin + point.y * cos);
+    groundHeight = Number.isFinite(footY) ? -footY : 0;
+  }
+  const bob = (1 - Math.cos(state.phase * 2)) * 0.5 * item.surface.maxSize * bobAmount * state.weight;
+  item.walkPivot.position.y = groundHeight + bob;
 }
 
 function updateFreeWalk(item, dt) {
