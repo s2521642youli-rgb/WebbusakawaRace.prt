@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ぶさかわ牧場</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; color: #304734; background: #dceef3; }
+    canvas { display: block; }
+    #pasturePanel { position: absolute; top: 20px; left: 20px; z-index: 10;
+      max-width: min(340px, calc(100vw - 80px)); padding: 18px 22px;
+      border-radius: 14px; background: rgba(255,255,255,.94); box-shadow: 0 4px 20px #30473416; }
+    h1 { margin: 0 0 10px; font-size: 24px; }
+    #pastureStatus { line-height: 1.6; margin: 0 0 14px; }
+    a { display: inline-block; padding: 10px 16px; border-radius: 8px;
+      background: #ffdf83; color: #304734; text-decoration: none; font-weight: bold; }
+    .hint { margin: 12px 0 0; font-size: 12px; color: #617465; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="pasturePanel">
+    <h1>ぶさかわ牧場</h1>
+    <p id="pastureStatus" role="status">牧場を準備しているよ…</p>
+    <a href="./index.html">顔を作る</a>
+    <p class="hint">ドラッグで見回す・スクロールで拡大縮小</p>
+  </div>
+  <script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { clone as cloneWithSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+
+const status = document.getElementById('pastureStatus');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xdceef3);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.001, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x888888, 2));
+const light = new THREE.DirectionalLight(0xffffff, 2);
+light.position.set(3, 5, 5);
+scene.add(light);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.49;
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+  new THREE.MeshStandardMaterial({ color: 0xb4ce91, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.002;
+ground.scale.set(20, 20, 1);
+scene.add(ground);
+camera.position.set(0, 6, 9);
+controls.target.set(0, 0.5, 0);
+controls.update();
+
+// index.htmlの保存形式・設定と同じ。保存済みデータは読み取りのみ。
+const storageKey = 'busakawaRace.characters.v1';
+const partSettings = {
+  eye_01: { path: './assets/eyes/eye_01.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
+  eye_02: { path: './assets/eyes/eye_02.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
+  mouth_01: { path: './assets/mouths/mouth_01.glb', sizeMultiplier: 0.55, fixedDepth: -0.1 }
+};
+const partSlots = ['eye_01', 'eye_02', 'mouth_01'];
+const pastureCharacters = [];
+let currentBounds;
+
+// 距離・速度はモデルの全高相当(maxSize)を基準にする。
+const walkConfig = {
+  speedInHeights: [0.28, 0.46],
+  walkSeconds: [2.5, 6],
+  idleSeconds: [1, 3.5],
+  turnRadiansPerSecond: 2.1,
+  rangePaddingInHeights: 2,
+  groundEdgePaddingInHeights: 0.5,
+  boundaryTurnInHeights: 0.9,
+  avoidanceInHeights: 0.22,
+  rollRadians: 0.045,
+  bobInHeights: 0.015,
+  strideInHeights: 0.45,
+  maxDeltaSeconds: 0.05
+};
+const walkBounds = { minX: 0, maxX: 0, minZ: 0, maxZ: 0 };
+const walkGrid = new Map();
+let walkCellSize = 1;
+let walkingReady = false;
+let sharedFootContacts;
+const randomBetween = (range) => range[0] + Math.random() * (range[1] - range[0]);
+
+
+function readRegisteredCharacters() {
+  const raw = localStorage.getItem(storageKey);
+  if (raw === null) return [];
+  let data;
+  try { data = JSON.parse(raw); } catch {
+    throw new Error('登録データを読み取れなかったよ。保存データは変更していないよ。');
+  }
+  if (!data || data.schemaVersion !== 1 || !Array.isArray(data.characters) ||
+      !Number.isSafeInteger(data.nextNumber) || data.nextNumber < 1) {
+    throw new Error('登録データの形式を確認できなかったよ。保存データは変更していないよ。');
+  }
+  const ids = new Set();
+  for (const record of data.characters) {
+    if (!record || !Number.isSafeInteger(record.id) || record.id < 1 || ids.has(record.id) ||
+        record.name !== `ぶさかわ${String(record.id).padStart(3, '0')}` ||
+        !record.parts || typeof record.parts !== 'object') {
+      throw new Error('登録データを確認できなかったよ。顔を作る画面へ戻って確認してね。');
+    }
+    ids.add(record.id);
+    for (const slot of partSlots) {
+      const part = record.parts[slot];
+      // データにないパーツは補完しない。
+      if (part === undefined) continue;
+      if (!part || typeof part.exists !== 'boolean' || !Object.hasOwn(partSettings, part.type) ||
+          ![part.x, part.y, part.rotation].every(Number.isFinite)) {
+        throw new Error(`${record.name}の顔データを確認できなかったよ。保存データは残してあるよ。`);
+      }
+    }
+  }
+  return data.characters;
+}
+
+// GLBは種類ごとに1回だけ読み込み、個体は骨を含めて複製する。
+const loader = new GLTFLoader();
+const modelTemplates = new Map();
+function loadTemplate(path) {
+  if (!modelTemplates.has(path)) {
+    modelTemplates.set(path, loader.loadAsync(path).then((gltf) => gltf.scene));
+  }
+  return modelTemplates.get(path);
+}
+
+// 計算は生成時だけ。制作画面と同じ座標系の中で復元してから個体全体を移動する。
+function createHeadSurface(character) {
+  character.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(character);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxSize = Math.max(size.x, size.y, size.z);
+  const headRadius = Math.min(size.x * 0.48, size.y * 0.34);
+  const headCenter = new THREE.Vector3(center.x, box.max.y - headRadius, center.z);
+  const headMinY = headCenter.y - headRadius;
+  const meshes = [];
+  character.traverse((object) => {
+    if (object.isMesh) {
+      meshes.push(object);
+      if (object.isSkinnedMesh) object.skeleton.update();
+    }
+  });
+  const raycaster = new THREE.Raycaster();
+  const direction = new THREE.Vector3(0, 0, -1);
+  const forward = new THREE.Vector3(0, 0, 1);
+  const rayHits = [];
+  const intersect = () => {
+    rayHits.length = 0;
+    return raycaster.intersectObjects(meshes, false, rayHits);
+  };
+
+  function placement(x, y, rotation, halfWidth, halfHeight, rearDepth, fixedDepth) {
+    const worldY = headCenter.y + headRadius * y;
+    if (worldY < headMinY || worldY > box.max.y) return null;
+    raycaster.set(new THREE.Vector3(headCenter.x + headRadius * x, worldY, box.max.z + maxSize), direction);
+    raycaster.near = 0;
+    raycaster.far = size.z + maxSize * 2;
+    const hit = intersect().find((h) => h.face && h.point.y >= headMinY);
+    if (!hit) return null;
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    hit.object.getVertexPosition(hit.face.a, a).applyMatrix4(hit.object.matrixWorld);
+    hit.object.getVertexPosition(hit.face.b, b).applyMatrix4(hit.object.matrixWorld);
+    hit.object.getVertexPosition(hit.face.c, c).applyMatrix4(hit.object.matrixWorld);
+    const normal = new THREE.Vector3().crossVectors(b.sub(a), c.sub(a));
+    if (normal.lengthSq() < 1e-20) return null;
+    normal.normalize();
+    if (normal.dot(direction) > 0) normal.negate();
+    const orientation = new THREE.Quaternion().setFromUnitVectors(forward, normal);
+    const sampleDirection = normal.clone().negate();
+    const sampleOffset = new THREE.Vector3(), sampleOrigin = new THREE.Vector3();
+    const riseVector = new THREE.Vector3();
+    let surfaceRise = 0;
+    // 回転を入れる前の9点補正。制作画面と同じく、角度で取り付け位置はずれない。
+    for (let ix = -1; ix <= 1; ix++) {
+      for (let iy = -1; iy <= 1; iy++) {
+        sampleOffset.set(ix * halfWidth, iy * halfHeight, 0).applyQuaternion(orientation);
+        sampleOrigin.copy(hit.point).add(sampleOffset).addScaledVector(normal, maxSize);
+        raycaster.set(sampleOrigin, sampleDirection);
+        raycaster.near = 0;
+        raycaster.far = maxSize * 2;
+        const sampleHit = intersect().find((h) => h.point.y >= headMinY);
+        if (sampleHit) surfaceRise = Math.max(surfaceRise, riseVector.subVectors(sampleHit.point, hit.point).dot(normal));
+      }
+    }
+    const normalizedRotation = rotation >= -180 && rotation <= 180
+      ? rotation : ((rotation % 360 + 540) % 360) - 180;
+    const offset = rearDepth + surfaceRise + maxSize * 0.001 + headRadius * fixedDepth;
+    return {
+      position: hit.point.clone().addScaledVector(normal, offset),
+      quaternion: orientation.multiply(new THREE.Quaternion().setFromAxisAngle(forward, THREE.MathUtils.degToRad(normalizedRotation)))
+    };
+  }
+  return { box, center, size, maxSize, headRadius, placement };
+}
+
+function restorePart(template, saved, surface) {
+  const settings = partSettings[saved.type];
+  const part = cloneWithSkeleton(template);
+  const originalSize = new THREE.Box3().setFromObject(part).getSize(new THREE.Vector3());
+  const maxPartSize = Math.max(originalSize.x, originalSize.y, originalSize.z);
+  if (maxPartSize <= 0) throw new Error(`${saved.type}の大きさを取得できなかったよ。`);
+  part.scale.multiplyScalar(surface.headRadius * settings.sizeMultiplier / maxPartSize);
+  const scaledBox = new THREE.Box3().setFromObject(part);
+  const scaledSize = scaledBox.getSize(new THREE.Vector3());
+  part.position.sub(scaledBox.getCenter(new THREE.Vector3()));
+  const group = new THREE.Group();
+  group.name = saved.type;
+  group.add(part);
+  group.updateMatrixWorld(true);
+  const rearDepth = Math.max(0, -new THREE.Box3().setFromObject(group).min.z);
+  const pose = surface.placement(saved.x, saved.y, saved.rotation,
+    scaledSize.x * 0.5, scaledSize.y * 0.5, rearDepth, settings.fixedDepth);
+  if (!pose) throw new Error(`${saved.type}の保存位置に頭の表面が見つからなかったよ。`);
+  group.position.copy(pose.position);
+  group.quaternion.copy(pose.quaternion);
+  return group;
+}
+
+function makeNameLabel(name, maxSize) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 640;
+  canvas.height = 128;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#304734';
+  context.font = 'bold 52px sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(name, canvas.width / 2, canvas.height / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
+  label.scale.set(maxSize * 1.45, maxSize * 0.29, 1);
+  label.name = 'registrationLabel';
+  return label;
+}
+
+function createPastureCharacter(record, templates) {
+  const group = new THREE.Group();
+  group.name = record.name;
+  // modelSpace内では制作時の座標系を維持する。
+  const modelSpace = new THREE.Group();
+  const character = cloneWithSkeleton(templates.character);
+  modelSpace.add(character);
+  const surface = createHeadSurface(character);
+  const parts = new Map();
+  for (const slot of partSlots) {
+    const saved = record.parts[slot];
+    if (!saved || saved.exists !== true) continue;
+    const partGroup = restorePart(templates.parts.get(saved.type), saved, surface);
+    parts.set(slot, partGroup);
+    modelSpace.add(partGroup);
+  }
+  // 頭足人と顔をまとめて足元を地面に、左右の中心を原点に揃える。
+  modelSpace.position.set(-surface.center.x, -surface.box.min.y, -surface.center.z);
+  // 移動・向きはgroup、よちよちした傾きはwalkPivotに分ける。
+  // 顔と体は同じwalkPivot内、番号はその外なので文字は揺れない。
+  const walkPivot = new THREE.Group();
+  walkPivot.add(modelSpace);
+  group.add(walkPivot);
+  if (!sharedFootContacts) sharedFootContacts = collectFootContacts(character, surface);
+  const label = makeNameLabel(record.name, surface.maxSize);
+  label.position.set(0, surface.size.y + surface.maxSize * 0.3, 0);
+  group.add(label);
+  const radius = Math.hypot(surface.size.x, surface.size.z) * 0.53;
+  return { id: record.id, name: record.name, group, walkPivot, modelSpace,
+    character, parts, surface, label, radius,
+    behavior: {
+      mode: 'free', state: 'idle', remaining: Math.random() * 1.8 + 0.2,
+      heading: Math.random() * Math.PI * 2,
+      speed: surface.maxSize * randomBetween(walkConfig.speedInHeights),
+      phase: Math.random() * Math.PI * 2, weight: 0, neighbors: []
+    }
+  };
+}
+
+// 足付近の頂点を初回だけ調べ、XY平面の凸包に絞る。
+// 傾きによる最下点を少数の接地点だけで計算でき、毎フレームのBox3/Raycasterは不要。
+function collectFootContacts(character, surface) {
+  const points = [];
+  const vertex = new THREE.Vector3();
+  character.traverse((mesh) => {
+    if (!mesh.isMesh) return;
+    for (let i = 0; i < mesh.geometry.attributes.position.count; i++) {
+      mesh.getVertexPosition(i, vertex).applyMatrix4(mesh.matrixWorld);
+      if (vertex.y <= surface.box.min.y + surface.maxSize * 0.2) {
+        points.push({ x: vertex.x - surface.center.x, y: vertex.y - surface.box.min.y });
+      }
+    }
+  });
+  points.sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const lower = [], upper = [];
+  for (const point of points) {
+    while (lower.length > 1 && cross(lower.at(-2), lower.at(-1), point) <= 0) lower.pop();
+    lower.push(point);
+  }
+  for (let i = points.length - 1; i >= 0; i--) {
+    const point = points[i];
+    while (upper.length > 1 && cross(upper.at(-2), upper.at(-1), point) <= 0) upper.pop();
+    upper.push(point);
+  }
+  lower.pop(); upper.pop();
+  return lower.concat(upper);
+}
+
+function initializeWalking(characters) {
+  let maxSize = 0, maxRadius = 0, extentX = 0, extentZ = 0, top = 0;
+  for (const item of characters) {
+    maxSize = Math.max(maxSize, item.surface.maxSize);
+    maxRadius = Math.max(maxRadius, item.radius);
+    extentX = Math.max(extentX, Math.abs(item.group.position.x) + item.radius);
+    extentZ = Math.max(extentZ, Math.abs(item.group.position.z) + item.radius);
+    top = Math.max(top, item.label.position.y + item.surface.maxSize * 0.2);
+  }
+  const padding = maxSize * walkConfig.rangePaddingInHeights;
+  const edge = maxSize * walkConfig.groundEdgePaddingInHeights;
+  const halfX = Math.min(ground.scale.x * 0.5 - edge, extentX + padding);
+  const halfZ = Math.min(ground.scale.y * 0.5 - edge, extentZ + padding);
+  Object.assign(walkBounds, { minX: -halfX, maxX: halfX, minZ: -halfZ, maxZ: halfZ });
+  walkCellSize = maxRadius * 2 + maxSize * walkConfig.avoidanceInHeights;
+  walkingReady = true;
+  // 歩行後もカメラ外へ消えにくいよう、移動範囲全体を初期画角に含める。
+  return new THREE.Box3(new THREE.Vector3(-halfX, 0, -halfZ), new THREE.Vector3(halfX, top, halfZ));
+}
+
+function gatherWalkNeighbors(item) {
+  const neighbors = item.behavior.neighbors;
+  neighbors.length = 0;
+  const cellX = Math.floor(item.group.position.x / walkCellSize);
+  const cellZ = Math.floor(item.group.position.z / walkCellSize);
+  for (let x = cellX - 1; x <= cellX + 1; x++) {
+    for (let z = cellZ - 1; z <= cellZ + 1; z++) {
+      const bucket = walkGrid.get(`${x},${z}`);
+      if (bucket) for (const other of bucket) if (other !== item) neighbors.push(other);
+    }
+  }
+}
+
+function updateWalkVisual(item, distance, dt) {
+  const state = item.behavior;
+  if (distance > 0) state.phase = (state.phase + distance /
+    (item.surface.maxSize * walkConfig.strideInHeights) * Math.PI * 2) % (Math.PI * 2);
+  const blend = 1 - Math.exp(-12 * dt);
+  state.weight += ((distance > 0 ? 1 : 0) - state.weight) * blend;
+  if (state.weight < 0.001) state.weight = 0;
+  const roll = Math.sin(state.phase) * walkConfig.rollRadians * state.weight;
+  item.walkPivot.rotation.z = roll;
+  let footY = Infinity;
+  const sin = Math.sin(roll), cos = Math.cos(roll);
+  for (const point of sharedFootContacts) footY = Math.min(footY, point.x * sin + point.y * cos);
+  const bob = (1 - Math.cos(state.phase * 2)) * 0.5 * item.surface.maxSize *
+    walkConfig.bobInHeights * state.weight;
+  item.walkPivot.position.y = (Number.isFinite(footY) ? -footY : 0) + bob;
+}
+
+function updateFreeWalk(item, dt) {
+  const state = item.behavior;
+  state.remaining -= dt;
+  if (state.remaining <= 0) {
+    if (state.state === 'idle') {
+      state.state = 'walking';
+      state.remaining = randomBetween(walkConfig.walkSeconds);
+      state.heading = Math.random() * Math.PI * 2;
+    } else {
+      state.state = 'idle';
+      state.remaining = randomBetween(walkConfig.idleSeconds);
+    }
+  }
+  if (state.state === 'idle') { updateWalkVisual(item, 0, dt); return; }
+  const position = item.group.position;
+  let desiredX = Math.sin(state.heading), desiredZ = Math.cos(state.heading);
+  const margin = item.surface.maxSize * walkConfig.boundaryTurnInHeights;
+  const minX = walkBounds.minX + item.radius, maxX = walkBounds.maxX - item.radius;
+  const minZ = walkBounds.minZ + item.radius, maxZ = walkBounds.maxZ - item.radius;
+  // 境界へ向かうほど内向きの成分を強め、角でもなめらかに引き返す。
+  desiredX += 3 * Math.max(0, (minX + margin - position.x) / margin);
+  desiredX -= 3 * Math.max(0, (position.x - maxX + margin) / margin);
+  desiredZ += 3 * Math.max(0, (minZ + margin - position.z) / margin);
+  desiredZ -= 3 * Math.max(0, (position.z - maxZ + margin) / margin);
+  gatherWalkNeighbors(item);
+  for (const other of state.neighbors) {
+    let dx = position.x - other.group.position.x, dz = position.z - other.group.position.z;
+    let distance = Math.hypot(dx, dz);
+    const avoid = item.radius + other.radius + item.surface.maxSize * walkConfig.avoidanceInHeights;
+    if (distance >= avoid) continue;
+    if (distance < 1e-8) { dx = item.id < other.id ? -1 : 1; dz = 0; distance = 1; }
+    const strength = 3 * Math.max(0.2, 1 - distance / avoid);
+    desiredX += dx / distance * strength;
+    desiredZ += dz / distance * strength;
+  }
+  const target = Math.atan2(desiredX, desiredZ);
+  const difference = Math.atan2(Math.sin(target - item.group.rotation.y), Math.cos(target - item.group.rotation.y));
+  item.group.rotation.y += THREE.MathUtils.clamp(difference,
+    -walkConfig.turnRadiansPerSecond * dt, walkConfig.turnRadiansPerSecond * dt);
+  item.group.rotation.y = Math.atan2(Math.sin(item.group.rotation.y), Math.cos(item.group.rotation.y));
+  // 大きな方向転換中は進みを弱める。実際の移動は体の正面方向だけ。
+  const step = state.speed * dt * Math.max(0, Math.cos(difference));
+  const nextX = THREE.MathUtils.clamp(position.x + Math.sin(item.group.rotation.y) * step, minX, maxX);
+  const nextZ = THREE.MathUtils.clamp(position.z + Math.cos(item.group.rotation.y) * step, minZ, maxZ);
+  let blocked = false;
+  for (const other of state.neighbors) {
+    const clearance = item.radius + other.radius;
+    const nextDistance = Math.hypot(nextX - other.group.position.x, nextZ - other.group.position.z);
+    const oldDistance = Math.hypot(position.x - other.group.position.x, position.z - other.group.position.z);
+    if (nextDistance < clearance && nextDistance <= oldDistance) { blocked = true; break; }
+  }
+  const distance = blocked ? 0 : Math.hypot(nextX - position.x, nextZ - position.z);
+  if (!blocked) { position.x = nextX; position.z = nextZ; }
+  updateWalkVisual(item, distance, dt);
+}
+
+function updatePastureCharacters(dt) {
+  if (!walkingReady || dt <= 0) return;
+  walkGrid.clear();
+  for (const item of pastureCharacters) {
+    const key = `${Math.floor(item.group.position.x / walkCellSize)},${Math.floor(item.group.position.z / walkCellSize)}`;
+    let bucket = walkGrid.get(key);
+    if (!bucket) { bucket = []; walkGrid.set(key, bucket); }
+    bucket.push(item);
+  }
+  for (const item of pastureCharacters) {
+    // 次の段階の集合行動はここで切り替えられる。今回はfreeだけを実装する。
+    if (item.behavior.mode === 'free') updateFreeWalk(item, dt);
+    else updateWalkVisual(item, 0, dt);
+  }
+}
+
+function arrangeCharacters(characters) {
+  const columns = Math.min(6, Math.ceil(Math.sqrt(characters.length)));
+  const rows = Math.ceil(characters.length / columns);
+  const maxSize = Math.max(...characters.map((c) => c.surface.maxSize));
+  const widest = Math.max(...characters.map((c) => c.surface.size.x));
+  const spacingX = Math.max(widest * 1.8, maxSize * 1.8);
+  const spacingZ = maxSize * 1.9;
+  for (let i = 0; i < characters.length; i++) {
+    const row = Math.floor(i / columns), column = i % columns;
+    const rowCount = Math.min(columns, characters.length - row * columns);
+    characters[i].group.position.set((column - (rowCount - 1) / 2) * spacingX,
+      0, ((rows - 1) / 2 - row) * spacingZ);
+    // 全個体は正面の+Z側（初期カメラ側）を向く。
+    characters[i].group.rotation.y = 0;
+  }
+  ground.scale.set(Math.max(maxSize * 16, columns * spacingX + maxSize * 8),
+    Math.max(maxSize * 16, rows * spacingZ + maxSize * 8), 1);
+  const bounds = new THREE.Box3();
+  for (const item of characters) bounds.expandByObject(item.group);
+  return bounds;
+}
+
+function fitCamera(bounds) {
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+  const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+  const distance = sphere.radius / Math.sin(Math.min(verticalFov, horizontalFov) / 2) * 1.15;
+  controls.target.copy(sphere.center);
+  camera.position.copy(sphere.center).addScaledVector(new THREE.Vector3(0, 0.75, 1).normalize(), distance);
+  camera.near = Math.max(sphere.radius / 1000, 0.001);
+  camera.far = Math.max(1000, distance * 20);
+  camera.updateProjectionMatrix();
+  controls.minDistance = sphere.radius * 0.35;
+  controls.maxDistance = distance * 8;
+  controls.update();
+}
+
+async function populatePasture() {
+  try {
+    const records = readRegisteredCharacters();
+    if (records.length === 0) {
+      status.textContent = 'まだ牧場には誰もいません';
+      return;
+    }
+    status.textContent = `${records.length}体のぶさかわを読み込み中…`;
+    const requiredParts = new Set();
+    for (const record of records) {
+      for (const slot of partSlots) {
+        const saved = record.parts[slot];
+        if (saved?.exists === true) requiredParts.add(saved.type);
+      }
+    }
+    const character = await loadTemplate('./assets/characters/tousokujin.glb');
+    const parts = new Map(await Promise.all([...requiredParts].map(async (type) =>
+      [type, await loadTemplate(partSettings[type].path)])));
+    for (let i = 0; i < records.length; i++) {
+      const item = createPastureCharacter(records[i], { character, parts });
+      pastureCharacters.push(item);
+      scene.add(item.group);
+      status.textContent = `${i + 1} / ${records.length}体を配置中…`;
+      if (i % 4 === 3) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    arrangeCharacters(pastureCharacters);
+    currentBounds = initializeWalking(pastureCharacters);
+    fitCamera(currentBounds);
+    status.textContent = `${pastureCharacters.length}体のぶさかわが暮らしているよ`;
+  } catch (error) {
+    console.error(error);
+    // 途中で失敗しても、復元済みの個体は見渡せる配置にする。
+    if (pastureCharacters.length) {
+      arrangeCharacters(pastureCharacters);
+      currentBounds = initializeWalking(pastureCharacters);
+      fitCamera(currentBounds);
+    }
+    status.textContent = error instanceof Error && !error.message.startsWith('Failed to fetch')
+      ? `牧場を準備できなかったよ。${error.message}`
+      : 'モデルを読み込めなかったよ。ローカルサーバーとモデルの保存先を確認してね。';
+  }
+}
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  if (currentBounds) fitCamera(currentBounds);
+});
+let lastFrameTime;
+function animate(now) {
+  requestAnimationFrame(animate);
+  // タブを戻したときや描画が遅れたときも、遠くへ飛ばないよう上限を設ける。
+  const dt = lastFrameTime === undefined || now === undefined ? 0 :
+    Math.min(walkConfig.maxDeltaSeconds, Math.max(0, (now - lastFrameTime) / 1000));
+  lastFrameTime = now;
+  updatePastureCharacters(dt);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+populatePasture();
+  </script>
+</body>
+</html>
