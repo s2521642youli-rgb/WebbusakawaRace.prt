@@ -30,7 +30,7 @@
     <h1>ぶさかわ牧場</h1>
     <p id="pastureStatus" role="status">牧場を準備しているよ…</p>
     <a href="./index.html">顔を作る</a>
-    <p class="hint">ドラッグで見回す・スクロールで拡大縮小</p>
+    <p class="hint">クリックで名前を表示・地面をクリックで閉じる<br>ドラッグで見回す・スクロールで拡大縮小</p>
   </div>
   <script type="module">
 import * as THREE from 'three';
@@ -245,20 +245,47 @@ function restorePart(template, saved, surface) {
 function makeNameLabel(name, maxSize) {
   const canvas = document.createElement('canvas');
   canvas.width = 640;
-  canvas.height = 128;
+  canvas.height = 160;
   const context = canvas.getContext('2d');
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 半透明の角丸ネームプレート
+  const left = 14, top = 12, width = 612, height = 136, radius = 46;
+  context.beginPath();
+  context.moveTo(left + radius, top);
+  context.lineTo(left + width - radius, top);
+  context.quadraticCurveTo(left + width, top, left + width, top + radius);
+  context.lineTo(left + width, top + height - radius);
+  context.quadraticCurveTo(left + width, top + height, left + width - radius, top + height);
+  context.lineTo(left + radius, top + height);
+  context.quadraticCurveTo(left, top + height, left, top + height - radius);
+  context.lineTo(left, top + radius);
+  context.quadraticCurveTo(left, top, left + radius, top);
+  context.closePath();
+
+  context.fillStyle = 'rgba(255, 255, 255, 0.78)';
+  context.fill();
+  context.strokeStyle = 'rgba(48, 71, 52, 0.14)';
+  context.lineWidth = 3;
+  context.stroke();
+
   context.fillStyle = '#304734';
   context.font = 'bold 52px sans-serif';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.fillText(name, canvas.width / 2, canvas.height / 2);
+
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
-  label.scale.set(maxSize * 1.45, maxSize * 0.29, 1);
+
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture, transparent: true, depthWrite: false
+  }));
+  label.scale.set(maxSize * 1.55, maxSize * 0.39, 1);
   label.name = 'registrationLabel';
+
+  // 普段は非表示
+  label.visible = false;
+
   return label;
 }
 
@@ -301,6 +328,90 @@ function createPastureCharacter(record, templates) {
     }
   };
 }
+
+// ========================================
+// 名前札のクリック選択
+// ========================================
+
+// キャラクターのメッシュだけをクリック対象にする。
+// 地面や名前札はクリック対象に含めない。
+const selectionRaycaster = new THREE.Raycaster();
+const selectionPointer = new THREE.Vector2();
+const selectableMeshes = [];
+const ownerByMesh = new WeakMap();
+const pointerStart = new Map();
+let selectedCharacter = null;
+
+function registerSelectableCharacter(item) {
+  item.modelSpace.traverse((object) => {
+    if (!object.isMesh) return;
+    selectableMeshes.push(object);
+    ownerByMesh.set(object, item);
+  });
+}
+
+function selectCharacter(item) {
+  if (selectedCharacter === item) return;
+
+  if (selectedCharacter) {
+    selectedCharacter.label.visible = false;
+  }
+
+  selectedCharacter = item;
+
+  if (selectedCharacter) {
+    selectedCharacter.label.visible = true;
+  }
+}
+
+function handlePastureClick(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+
+  selectionPointer.set(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1
+  );
+
+  // 現在の歩行姿勢をクリック判定に反映
+  scene.updateMatrixWorld(true);
+  selectionRaycaster.setFromCamera(selectionPointer, camera);
+
+  const hits = selectionRaycaster.intersectObjects(selectableMeshes, false);
+
+  selectCharacter(
+    hits.length ? ownerByMesh.get(hits[0].object) || null : null
+  );
+}
+
+// ドラッグ操作をクリックと誤判定しないようにする
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  pointerStart.set(event.pointerId, {
+    x: event.clientX,
+    y: event.clientY
+  });
+});
+
+renderer.domElement.addEventListener('pointerup', (event) => {
+  const start = pointerStart.get(event.pointerId);
+  pointerStart.delete(event.pointerId);
+
+  if (!start || event.button !== 0) return;
+
+  const distance = Math.hypot(
+    event.clientX - start.x,
+    event.clientY - start.y
+  );
+
+  if (distance > 7) return;
+
+  handlePastureClick(event.clientX, event.clientY);
+});
+
+renderer.domElement.addEventListener('pointercancel', (event) => {
+  pointerStart.delete(event.pointerId);
+});
 
 // GLTFLoaderはLeg.L等のピリオドを除去するので、両表記を受け付ける。
 function createLegRig(character, surface) {
@@ -663,6 +774,10 @@ async function populatePasture() {
       [type, await loadTemplate(partSettings[type].path)])));
     for (let i = 0; i < records.length; i++) {
       const item = createPastureCharacter(records[i], { character, parts });
+
+      // この頭足人をクリックで選択できるようにする
+      registerSelectableCharacter(item);
+
       pastureCharacters.push(item);
       scene.add(item.group);
       status.textContent = `${i + 1} / ${records.length}体を配置中…`;
