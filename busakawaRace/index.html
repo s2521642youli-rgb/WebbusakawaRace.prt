@@ -435,8 +435,8 @@ const partSettings = {
 
 
 // モデルを追加する場所。ファイルがあるモデルだけカテゴリに登録する。
-partSettings.mouth_02 = { path:'./assets/mouths/mouth_02.glb', sizeMultiplier:0.55, fixedDepth:-0.1 };
-partSettings.mouth_03 = { path:'./assets/mouths/mouth_03.glb', sizeMultiplier:0.55, fixedDepth:-0.1 };
+partSettings.mouth_02 = { path:'./assets/mouths/mouth_02.glb', sizeMultiplier:1.10, fixedDepth:-0.13, depthLocked:true };
+partSettings.mouth_03 = { path:'./assets/mouths/mouth_03.glb', sizeMultiplier:0.715, fixedDepth:-0.16, depthLocked:true };
 const partCategories = {
   eyes: { label:'目', slots:['eye_01','eye_02'], models:['eye_01','eye_02'] },
   mouth: { label:'口', slots:['mouth_01'], models:['mouth_01','mouth_02','mouth_03'] }
@@ -1140,6 +1140,7 @@ function loadFacePart(
   loadPartTemplate(partName).then((template) => {
 
       let part = cloneSkeleton(template);
+      let activeModelType = partName;
 
 
       // ========================================
@@ -1249,6 +1250,8 @@ function loadFacePart(
         ySlider.value = String(state.y);
         rotationSlider.value = String(state.rotation);
         if (depthSlider) {
+          depthSlider.disabled = partSettings[activeModelType].depthLocked === true;
+          depthSlider.title = depthSlider.disabled ? 'このモデルの沈み具合は固定だよ' : '浮き具合を調整';
           depthSlider.value = String(state.depth);
           document.getElementById(depthSliderId + 'Value').textContent = state.depth.toFixed(2);
         }
@@ -1318,8 +1321,8 @@ function loadFacePart(
         // パーツごとの埋め込み量（初期値 -0.1）
         // --------------------------------
 
-        const actualDepth =
-          depth;
+        const activeSettings = partSettings[activeModelType];
+        const actualDepth = activeSettings.depthLocked ? activeSettings.fixedDepth : depth;
 
         const rotation = rotationDeg >= -180 && rotationDeg <= 180
           ? rotationDeg
@@ -1484,18 +1487,20 @@ function loadFacePart(
             replacement.position.sub(scaled.getCenter(new THREE.Vector3()));
             replacement.updateMatrixWorld(true);
             const centered = new THREE.Box3().setFromObject(replacement);
-            const old = { part, rearDepth, halfWidth, halfHeight };
+            const old = { part, rearDepth, halfWidth, halfHeight, activeModelType };
+            activeModelType = type;
             rearDepth = Math.max(0, -centered.min.z);
             halfWidth = dimensions.x / 2; halfHeight = dimensions.y / 2;
             surfaceCache.revision = -1;
             if (!updatePartPosition(state.x, state.y, state.rotation, state.depth)) {
-              ({part, rearDepth, halfWidth, halfHeight} = old);
+              ({part, rearDepth, halfWidth, halfHeight, activeModelType} = old);
               surfaceCache.revision = -1;
               updatePartPosition(state.x, state.y, state.rotation, state.depth);
               throw new Error('この位置には配置できない');
             }
             partGroup.remove(part); part = replacement; partGroup.add(part);
             choice.type = type; choice.enabled = true;
+            syncControls();
             // 手動選択したモデルは、マーカーなしでもその場で確認する。
             if (arucoEnabled.checked) { arucoEnabled.checked = false; clearArucoTracking(); updateArucoStatus(); }
             updateArucoVisibility();
