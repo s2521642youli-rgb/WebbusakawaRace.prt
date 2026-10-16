@@ -20,7 +20,8 @@ canvas { display:block; width:100%; height:100%; }
 #results h2 { margin:0 0 6px; font-size:18px; } #ranking { margin:0; padding-left:0; list-style:none; line-height:1.7; }
 #votingLayout { flex-shrink:0; overflow:hidden; }
 #votingLayout[hidden] { display:none; }
-#voting { padding:8px 18px; background:#f4f6ee; display:flow-root; will-change:transform,opacity; }
+#skipPreparation { position:absolute; right:18px; bottom:8px; font-size:12px; padding:6px 10px; background:#e0e6df; }
+#voting { position:relative; padding:8px 18px; background:#f4f6ee; display:flow-root; will-change:transform,opacity; }
 #phaseTimer { font-size:28px; font-weight:bold; margin:6px 0; font-variant-numeric:tabular-nums; }
 #phaseMessage,#voteFeedback { margin:4px 0; }
 #voting h2 { font-size:20px; margin:0 0 6px; }
@@ -51,6 +52,7 @@ canvas { display:block; width:100%; height:100%; }
 <h2 id="voteHeading">この子、ぶさかわ！と思ったら投票してね</h2>
 <p id="phaseMessage"></p><p id="phaseTimer" role="timer"></p>
 <div id="voteCards"></div><p id="voteFeedback" role="status"></p>
+<button id="skipPreparation" type="button" title="開発用：準備時間だけを省略する" hidden>準備をスキップ</button>
 </section>
 </div>
 <div id="viewport"><div id="countdown" role="status" aria-live="polite"></div>
@@ -64,6 +66,7 @@ import { clone as cloneWithSkeleton } from 'three/addons/utils/SkeletonUtils.js'
 
 const status=document.getElementById('raceStatus');
 const retryButton=document.getElementById('retry');
+const skipPreparationButton=document.getElementById('skipPreparation');
 const countdown=document.getElementById('countdown'), results=document.getElementById('results');
 const winnerAnnouncement=document.getElementById('winnerAnnouncement');
 const ranking=document.getElementById('ranking'), viewport=document.getElementById('viewport');
@@ -81,13 +84,13 @@ const previewEase = t => { t=THREE.MathUtils.clamp(t,0,1); return t*t*t*(t*(t*6-
 const raceCountdownSeconds=3;
 // 投票は一時状態のみ。登録済みキャラクターやlocalStorageには書き込まない。
 const voting={counts:new Map(),locked:null,views:new Map(),feedbackUntil:0};
-const votingRaceConfig={firstFinishSeconds:30,secondsPerRank:1.3,maxSpeedInHeights:3.2};
+const votingRaceConfig={firstFinishSeconds:30,secondsPerRank:1.3,maxSpeedInHeights:3.2,paceFadeStart:.35,paceFadeEnd:.8};
 // 距離はモデル全高に対する倍率。中心ルートの長さは4*halfStraight+2π*curveRadius。
 const trackConfig={halfStraight:3.8,curveRadius:4.8,width:6,laps:1,samples:256};
 // lateralStepは初期の間隔、lateralSpeedは横移動の目安、clearanceは接近時の最低中心間隔。
 const passingConfig={lateralStep:1.35,lateralSpeed:0.7,clearance:1.12};
 // 1体ごとの発生確率。イベントは時間をずらして計画し、最後の6秒には発生させない。
-const incidentConfig={probability:0.28,durations:{stumble:1.25,fall:2.6,roll:2.1},minGapSeconds:3};
+const incidentConfig={probability:0.28,durations:{stumble:1.25,fall:2.6,roll:2.1},minGapSeconds:3,recoverySeconds:2.4};
 // 減速時間、ゴール後の間、優勝者へ近づく時間、その顔を見せる時間（秒）。
 const finishShowConfig={coastSeconds:2.1,pauseSeconds:1.6,zoomSeconds:2.4,revealSeconds:1.4};
 const raceCameraConfig={followPerSecond:1.5,overviewSeconds:2.5};
@@ -712,8 +715,10 @@ function getFlowSnapshot(now=performance.now()) {
 function setFlowText(element,text) { if(element.textContent!==text)element.textContent=text; }
 function renderFlow(now) {
   const flow=getFlowSnapshot(now),left=flow.remainingSeconds;
+  skipPreparationButton.hidden=flow.phase!=='preparation'||!racers.length;
+  skipPreparationButton.disabled=skipPreparationButton.hidden;
   const messages={
-    preparation:['まもなく投票開始！','出走キャラクターを見比べてね。',`投票開始まで あと${left}秒`],
+    preparation:['まもなく投票開始！','出走するぶさかわをチェック！',`投票開始まで あと${left}秒`],
     voting:['投票受付中！','一番ぶさかわだと思う子に投票しよう！',`投票終了まで あと${left}秒`],
     closed:race.noVotes?['投票がありませんでした','もう一度投票してください。「もう一度」で準備から再開できます。','']
       :['投票終了！','まもなくレースが始まります！',`レース開始まで あと${left}秒`]
@@ -843,11 +848,17 @@ function planPassingPaths(plans,random) {
 // 正の速度曲線を積分した時刻表。接地・ハプニング・ゴール後の演出とは独立。
 function plannedSpeedWeight(plan,time) {
   const u=THREE.MathUtils.clamp(time/plan.targetTime,0,1);
-  let weight=previewEase(u/.12)*(1-.6*previewEase((u-.8)/.2))*(1+plan.pulse*Math.sin(Math.PI*2*u+plan.phase));
+  // 中盤のペース差だけを緩やかに収束させ、最後の20%は一定の巡航速度で走り抜ける。
+  // 終盤のブレーキや直前の速度合わせは行わず、積分の正規化で目標到達時刻を守る。
+  // ペース差の収束を早めに始め、追い上げを長い時間に分散する。
+  const variation=1-previewEase((u-votingRaceConfig.paceFadeStart)/(votingRaceConfig.paceFadeEnd-votingRaceConfig.paceFadeStart));
+  let weight=previewEase(u/.12)*(1+plan.pulse*Math.sin(Math.PI*2*u+plan.phase)*variation);
   const event=plan.event;
-  if(event&&time>=event.start&&time<=event.start+event.duration) {
-    const e=(time-event.start)/event.duration;
-    const envelope=previewEase(e/.18)*(1-previewEase((e-.75)/.25));
+  if(event&&time>=event.start) {
+    // 姿勢を立て直した後も、速度は最低2.4秒かけて滑らかに回復させる。
+    const recoveryStart=event.start+event.duration*.75;
+    const recoveryDuration=Math.max(incidentConfig.recoverySeconds,event.duration*.25);
+    const envelope=previewEase((time-event.start)/(event.duration*.18))*(1-previewEase((time-recoveryStart)/recoveryDuration));
     const reduction={stumble:.5,fall:1,roll:.65}[event.kind];
     weight*=1-reduction*envelope;
   }
@@ -970,8 +981,8 @@ function buildCourse(height) {
   grass.rotation.x=-Math.PI/2;grass.position.y=-.04*height;backgroundObjects.add(grass);
   trackObjects.add(trackRibbon(-course.width/2,course.width/2,0xe5d7b8,0));
   for(const side of [-1,1])trackObjects.add(trackRibbon(side*course.width/2-height*.025,side*course.width/2+height*.025,0xffffff,height*.002));
-  const line=new THREE.Mesh(new THREE.PlaneGeometry(height*.09,course.width),new THREE.MeshStandardMaterial({color:0xffffff,roughness:1}));
-  line.rotation.x=-Math.PI/2;line.position.set(0,height*.004,course.curveRadius);trackObjects.add(line);
+  const line=new THREE.Mesh(new THREE.PlaneGeometry(height*.09,course.width),new THREE.MeshStandardMaterial({color:0xffffff,roughness:1,polygonOffset:true,polygonOffsetFactor:-4,polygonOffsetUnits:-4,depthTest:true,depthWrite:false}));
+  line.rotation.x=-Math.PI/2;line.position.set(0,height*.006,course.curveRadius);line.renderOrder=2;line.name='startGoalLine';trackObjects.add(line);
   const label=makeNameLabel('START / GOAL',height);label.visible=true;label.position.set(-height,height*.45,course.curveRadius+course.width/2+height*.5);trackObjects.add(label);
   frameCourse();
 }
@@ -1186,6 +1197,11 @@ function updateRace(now=performance.now(),visualDt=0) {
     for(const item of racers)updateWalkVisual(item,0,visualDt);
   }
 }
+// フェーズと締切を確認してから一度だけ進める。投票15秒は押した時刻から丸ごと確保。
+skipPreparationButton.addEventListener('click',()=>{
+  const now=performance.now();syncFlow(now);
+  if(race.state==='preparation'&&racers.length)enterPhase('voting',now);
+});
 retryButton.addEventListener('click',()=>{
   if(race.state==='result'||(race.state==='closed'&&race.noVotes))resetRace();
 });
