@@ -8,7 +8,7 @@
     body { margin: 0; overflow: hidden; font-family: sans-serif; color: #304734; background: #dceef3; }
     canvas { display: block; }
     #pasturePanel { position: absolute; top: 20px; left: 20px; z-index: 10;
-      max-width: min(340px, calc(100vw - 80px)); padding: 18px 22px;
+      max-width: min(340px, calc(100vw - 80px)); max-height: calc(100vh - 76px); overflow-y:auto; padding: 18px 22px;
       border-radius: 14px; background: rgba(255,255,255,.94); box-shadow: 0 4px 20px #30473416; }
     h1 { margin: 0 0 10px; font-size: 24px; }
     #pastureStatus { line-height: 1.6; margin: 0 0 14px; }
@@ -18,6 +18,9 @@
     button { padding: 10px 16px; border: 0; border-radius: 8px; color: #304734; background: #bfe2bd; font: inherit; font-weight: bold; cursor: pointer; }
     button:disabled { opacity: .5; cursor: default; }
     #resetCharacters { background: #e9a6a6; }
+    #entrantList { padding-left:0; list-style:none; line-height:1.7; margin:8px 0; }
+    #selectionMode[aria-pressed="true"] { background:#ffdf83; outline:2px solid #bc9027; }
+    #launchRace { background:#ffdf83; }
     .hint { margin: 12px 0 0; font-size: 12px; color: #617465; }
   </style>
   <script type="importmap">
@@ -34,7 +37,16 @@
     <h1>ぶさかわ牧場</h1>
     <p id="pastureStatus" role="status">牧場を準備しているよ…</p>
     <a href="./index.html">顔を作る</a>
-    <a href="./race.html">レースへ！</a>
+    <section aria-label="レースの出走者">
+      <div class="actions"><button id="selectionMode" type="button" aria-pressed="false" disabled>出走者を選ぶ</button></div>
+      <p id="selectionStatus" role="status">出走者を読み込み中…</p>
+      <ul id="entrantList" aria-label="選択中の出走者"></ul>
+      <div class="actions">
+        <button id="randomEntrants" type="button" disabled>空きをランダムで埋める</button>
+        <button id="clearEntrants" type="button" disabled>選択をすべて解除</button>
+        <button id="launchRace" type="button" disabled>この子たちでレースへ！</button>
+      </div>
+    </section>
     <div class="actions">
       <button id="gather" type="button" disabled>集合！</button>
       <button id="dismiss" type="button" disabled>解散！</button>
@@ -90,6 +102,117 @@ const partSettings = {
 const partSlots = ['eye_01', 'eye_02', 'mouth_01'];
 const pastureCharacters = [];
 let currentBounds;
+
+// キャラクター本体のlocalStorageとは別に、同じタブの往復で選択を保持。
+const entrantSelectionConfig = { maxEntrants: 4, storageKey: 'busakawaRace.entrants.v1' };
+const entrantSelection = { mode: false, ids: [], ready: false, message: '' };
+const entrantNumbers = ['①','②','③','④'];
+const entrantNumber = index => entrantNumbers[index] ?? String(index + 1);
+const selectionModeButton = document.getElementById('selectionMode');
+const randomEntrantsButton = document.getElementById('randomEntrants');
+const clearEntrantsButton = document.getElementById('clearEntrants');
+const launchRaceButton = document.getElementById('launchRace');
+const selectionStatus = document.getElementById('selectionStatus');
+const entrantBadgeMaterials = new Map();
+function saveEntrantSelection() {
+  try {
+    sessionStorage.setItem(entrantSelectionConfig.storageKey, JSON.stringify({schemaVersion:1, ids:[...entrantSelection.ids]}));
+    return true;
+  } catch {
+    entrantSelection.message = '出走者を保存できなかったよ。ブラウザの保存設定を確認してね。';
+    return false;
+  }
+}
+function restoreEntrantSelection() {
+  try {
+    const raw = sessionStorage.getItem(entrantSelectionConfig.storageKey);
+    if (raw === null) return;
+    const data = JSON.parse(raw);
+    if (!data || data.schemaVersion !== 1 || !Array.isArray(data.ids) ||
+        !data.ids.every(id => Number.isSafeInteger(id) && id > 0)) throw new Error('invalid');
+    const available = new Set(pastureCharacters.map(item => item.id));
+    entrantSelection.ids = [...new Set(data.ids)].filter(id => available.has(id)).slice(0,entrantSelectionConfig.maxEntrants);
+    if (entrantSelection.ids.length !== data.ids.length) entrantSelection.message = '今いる子だけで出走者を復元したよ。';
+  } catch {
+    entrantSelection.message = '前回の選択を読み取れなかったよ。出走者を選び直してね。';
+  }
+}
+function renderEntrantSelection() {
+  const { ids, mode, ready, message } = entrantSelection;
+  selectionModeButton.disabled = !ready || !pastureCharacters.length;
+  selectionModeButton.setAttribute('aria-pressed', String(mode));
+  selectionModeButton.textContent = mode ? '選択を終える（通常モードへ）' : '出走者を選ぶ';
+  randomEntrantsButton.disabled = !ready || ids.length >= Math.min(entrantSelectionConfig.maxEntrants,pastureCharacters.length);
+  clearEntrantsButton.disabled = !ids.length;
+  launchRaceButton.disabled = !ready || !ids.length;
+  selectionStatus.textContent = !ready ? '出走者を読み込み中…' : !pastureCharacters.length
+    ? 'まだ出走できる子がいないよ。「顔を作る」から登録してね。'
+    : `出走者 ${ids.length} / ${entrantSelectionConfig.maxEntrants}体・${mode ? '選択モード：クリックで追加・解除' : '通常モード：クリックで名前を表示'}${message ? '／' + message : ''}`;
+  const rows = Array.from({length:entrantSelectionConfig.maxEntrants}, (_,index) => {
+    const row = document.createElement('li');
+    const item = pastureCharacters.find(item => item.id === ids[index]);
+    row.textContent = `${entrantNumber(index)} ${item?.name ?? '未選択'}`;
+    return row;
+  });
+  document.getElementById('entrantList').replaceChildren(...rows);
+  for (const item of pastureCharacters) {
+    const index = ids.indexOf(item.id);
+    if (index >= 0) {
+      if (!entrantBadgeMaterials.has(index)) {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 128;
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#ffdf83'; context.beginPath();
+        context.roundRect(4,4,120,120,36); context.fill();
+        context.fillStyle = '#304734'; context.font = 'bold 88px sans-serif';
+        context.textAlign = 'center'; context.textBaseline = 'middle';
+        context.fillText(entrantNumber(index),64,66);
+        const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+        entrantBadgeMaterials.set(index,new THREE.SpriteMaterial({map:texture,transparent:true,depthWrite:false,depthTest:false}));
+      }
+      if (!item.entrantBadge) {
+        item.entrantBadge = new THREE.Sprite(entrantBadgeMaterials.get(index));
+        item.entrantBadge.name = 'entrantNumber'; item.entrantBadge.renderOrder = 10;
+        item.entrantBadge.scale.set(item.surface.maxSize*.38,item.surface.maxSize*.38,1);
+        item.entrantBadge.position.set(0,item.label.position.y+item.surface.maxSize*.43,0);
+        item.group.add(item.entrantBadge);
+      }
+      item.entrantBadge.material = entrantBadgeMaterials.get(index);
+      item.entrantBadge.visible = true;
+    } else if (item.entrantBadge) item.entrantBadge.visible = false;
+  }
+}
+function toggleEntrant(item) {
+  if (!entrantSelection.ready || !pastureCharacters.includes(item)) return;
+  const index = entrantSelection.ids.indexOf(item.id);
+  entrantSelection.message = '';
+  if (index >= 0) entrantSelection.ids.splice(index,1);
+  else if (entrantSelection.ids.length < entrantSelectionConfig.maxEntrants) entrantSelection.ids.push(item.id);
+  else { entrantSelection.message = '出走できるのは最大' + entrantSelectionConfig.maxEntrants + '体だよ。先に選択を解除してね。'; renderEntrantSelection(); return; }
+  saveEntrantSelection(); renderEntrantSelection();
+}
+selectionModeButton.addEventListener('click', () => {
+  if (selectionModeButton.disabled) return;
+  entrantSelection.mode = !entrantSelection.mode; entrantSelection.message = ''; renderEntrantSelection();
+});
+randomEntrantsButton.addEventListener('click', () => {
+  if (!entrantSelection.ready) return;
+  const candidates = pastureCharacters.filter(item => !entrantSelection.ids.includes(item.id));
+  // Fisher–Yates。既に選んだ子とその順番は維持する。
+  for (let i=candidates.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [candidates[i],candidates[j]]=[candidates[j],candidates[i]]; }
+  entrantSelection.ids.push(...candidates.slice(0,entrantSelectionConfig.maxEntrants-entrantSelection.ids.length).map(item=>item.id));
+  entrantSelection.message = ''; saveEntrantSelection(); renderEntrantSelection();
+});
+clearEntrantsButton.addEventListener('click', () => {
+  entrantSelection.ids = []; entrantSelection.message = ''; saveEntrantSelection(); renderEntrantSelection();
+});
+launchRaceButton.addEventListener('click', () => {
+  if (!entrantSelection.ready || !entrantSelection.ids.length) return;
+  if (saveEntrantSelection()) window.location.href = './race.html';
+  else renderEntrantSelection();
+});
+renderEntrantSelection();
+
 
 // 距離・速度はモデルの全高相当(maxSize)を基準にする。
 const walkConfig = {
@@ -394,12 +517,13 @@ renderer.domElement.addEventListener('pointermove', e => {
 renderer.domElement.addEventListener('pointercancel', e => pointers.delete(e.pointerId));
 renderer.domElement.addEventListener('pointerup', e => {
   const p = pointers.get(e.pointerId); pointers.delete(e.pointerId);
-  if (!p || dragged || e.button !== 0 || gathering) return;
+  if (!p || dragged || e.button !== 0) return;
   const r = renderer.domElement.getBoundingClientRect();
   pickPoint.set((e.clientX-r.left)/r.width*2-1, -(e.clientY-r.top)/r.height*2+1);
   scene.updateMatrixWorld(true); pickRay.setFromCamera(pickPoint, camera);
-  selectedCharacter = meshOwners.get(pickRay.intersectObjects(pickMeshes, false)[0]?.object) || null;
-  refreshLabels();
+  const picked = meshOwners.get(pickRay.intersectObjects(pickMeshes, false)[0]?.object) || null;
+  if (entrantSelection.mode) { if (picked) toggleEntrant(picked); }
+  else { selectedCharacter = picked; refreshLabels(); }
 });
 const gatherRadiusOf = item => item.gatherRadius ?? item.radius;
 const distanceXZ = (a,b) => Math.hypot(a.x-b.x, a.z-b.z);
@@ -1120,6 +1244,10 @@ async function populatePasture() {
     status.textContent = error instanceof Error && !error.message.startsWith('Failed to fetch')
       ? `牧場を準備できなかったよ。${error.message}`
       : 'モデルを読み込めなかったよ。ローカルサーバーとモデルの保存先を確認してね。';
+  } finally {
+    entrantSelection.ready = true;
+    restoreEntrantSelection();
+    renderEntrantSelection();
   }
 }
 window.addEventListener('resize', () => {

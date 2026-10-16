@@ -16,7 +16,9 @@ canvas { display:block; width:100%; height:100%; }
 #countdown { position:absolute; top:35%; width:100%; text-align:center; font-size:72px; font-weight:bold; pointer-events:none; text-shadow:0 2px 6px white; }
 #results { position:absolute; left:14px; bottom:14px; padding:10px 14px; background:rgba(255,255,255,.9); border-radius:8px; }
 #results h2 { margin:0 0 6px; font-size:18px; } #ranking { margin:0; padding-left:0; list-style:none; line-height:1.7; }
-#voting { flex-shrink:0; padding:8px 18px; background:#f4f6ee; }
+#votingLayout { flex-shrink:0; overflow:hidden; }
+#votingLayout[hidden] { display:none; }
+#voting { padding:8px 18px; background:#f4f6ee; display:flow-root; will-change:transform,opacity; }
 #phaseTimer { font-size:28px; font-weight:bold; margin:6px 0; font-variant-numeric:tabular-nums; }
 #phaseMessage,#voteFeedback { margin:4px 0; }
 #voting h2 { font-size:20px; margin:0 0 6px; }
@@ -42,11 +44,13 @@ canvas { display:block; width:100%; height:100%; }
 <a href="./pasture.html">牧場に戻る</a>
 <p id="raceStatus" role="status">コースを準備しているよ…</p>
 </header>
+<div id="votingLayout" hidden>
 <section id="voting" hidden aria-label="出走キャラクターへの投票">
 <h2 id="voteHeading">この子、ぶさかわ！と思ったら投票してね</h2>
 <p id="phaseMessage"></p><p id="phaseTimer" role="timer"></p>
 <div id="voteCards"></div><p id="voteFeedback" role="status"></p>
 </section>
+</div>
 <div id="viewport"><div id="countdown" role="status" aria-live="polite"></div>
 <section id="results" hidden><h2>レース結果</h2><ol id="ranking"></ol></section></div>
 <script type="module">
@@ -59,10 +63,17 @@ const status=document.getElementById('raceStatus');
 const retryButton=document.getElementById('retry');
 const countdown=document.getElementById('countdown'), results=document.getElementById('results');
 const ranking=document.getElementById('ranking'), viewport=document.getElementById('viewport');
+const votingLayout=document.getElementById('votingLayout');
 const votePanel=document.getElementById('voting'),voteCards=document.getElementById('voteCards');
 const voteHeading=document.getElementById('voteHeading');
 const phaseMessage=document.getElementById('phaseMessage'),phaseTimer=document.getElementById('phaseTimer'),voteFeedback=document.getElementById('voteFeedback');
 const votingTimerConfig={preparationSeconds:10,votingSeconds:15,closingSeconds:5};
+// 正面では止まらず、左右端で自然に減速する同期した往復回転。
+const votingPreviewConfig = { angleDegrees:45, swayCycleSeconds:9, settleSeconds:0.35 };
+// 閉幕5秒のうち、1秒表示→2秒退場→残りはレース構図で待機。
+const votingPanelExitConfig = { holdSeconds:1, slideSeconds:2 };
+const votingPreview = { startedAt:0, closingHeadings:[], closingVelocity:0, voteView:null, raceView:null };
+const previewEase = t => { t=THREE.MathUtils.clamp(t,0,1); return t*t*t*(t*(t*6-15)+10); };
 const raceCountdownSeconds=3;
 // 投票は一時状態のみ。登録済みキャラクターやlocalStorageには書き込まない。
 const voting={counts:new Map(),locked:null,views:new Map(),feedbackUntil:0};
@@ -625,10 +636,23 @@ function updateWalkVisual(item,distance,dt) {
   item.walkPivot.position.y=rigGroundHeight(item)+motion.bob;
 }
 
-// 将来は牧場から選んだIDを渡す。現段階では登録番号順の先頭4体を仮出走者にする。
+// 牧場と同じ上限・キー。出走順は選択順（レーン順）を維持する。
+const entrantSelectionConfig = { maxEntrants: 4, storageKey: 'busakawaRace.entrants.v1' };
+function readSelectedEntrantIds() {
+  try {
+    const raw = sessionStorage.getItem(entrantSelectionConfig.storageKey);
+    if (raw === null) return null; // 直接アクセスは従来の登録番号順。
+    const data = JSON.parse(raw);
+    if (!data || data.schemaVersion !== 1 || !Array.isArray(data.ids) ||
+        !data.ids.every(id => Number.isSafeInteger(id) && id > 0)) return null;
+    return [...new Set(data.ids)].slice(0,entrantSelectionConfig.maxEntrants);
+  } catch { return null; } // 不正データ・保存制限でも直接アクセスとして動作。
+}
 function selectRaceEntrants(records, selectedIds=null) {
-  const eligible=selectedIds ? selectedIds.map(id=>records.find(record=>record.id===id)).filter(Boolean) : [...records].sort((a,b)=>a.id-b.id);
-  return [...new Map(eligible.map(record=>[record.id,record])).values()].slice(0,4);
+  const byId = new Map(records.map(record=>[record.id,record]));
+  // []や削除済みIDしかない指定を、勝手に別の子で補完しない。
+  const eligible=selectedIds !== null ? selectedIds.map(id=>byId.get(id)).filter(Boolean) : [...records].sort((a,b)=>a.id-b.id);
+  return [...new Map(eligible.map(record=>[record.id,record])).values()].slice(0,entrantSelectionConfig.maxEntrants);
 }
 // 集計・同順位判定は描画や走行から独立。競技順位（1位、1位、3位…）を使う。
 function tallyVotes(entrants,counts) {
@@ -640,6 +664,8 @@ function tallyVotes(entrants,counts) {
 function castVote(id,now=performance.now()) {
   // 描画が止まっていても、クリック時点で締切を検査してから受理する。
   syncFlow(now);
+  updateVotingPanelLayout(now);
+  updateVotingPreview(now);
   if(race.state!=='voting'||now>=race.deadline||!voting.counts.has(id))return;
   voting.counts.set(id,voting.counts.get(id)+1);
   voting.feedbackUntil=now+900;renderFlow(now);
@@ -691,7 +717,15 @@ function enterPhase(phase,at) {
     closed:votingTimerConfig.closingSeconds,countdown:raceCountdownSeconds}[phase];
   race.deadline=seconds===undefined?null:at+seconds*1000;
   voting.feedbackUntil=0;
+  if(phase==='preparation') {
+    votingPreview.startedAt=at;
+    votingLayout.style.height=''; votePanel.style.transform=''; votePanel.style.opacity='';
+    votePanel.style.pointerEvents=''; votingLayout.setAttribute('aria-hidden','false');
+  }
   if(phase==='closed') {
+    // 締切の正確な時刻の姿勢から戻す。描画が止まっていても進行時計と一致する。
+    votingPreview.closingHeadings=racers.map(item=>votingPreviewHeading(item,at));
+    votingPreview.closingVelocity=votingPreviewVelocity(at);
     race.noVotes=![...voting.counts.values()].some(count=>count>0);
     if(race.noVotes)race.deadline=null;
     else {
@@ -700,8 +734,10 @@ function enterPhase(phase,at) {
     }
   }
   if(phase==='racing') { race.raceStartedAt=at;race.elapsed=0;status.textContent='レース中！'; }
+  if(phase==='countdown'||phase==='racing') for(const item of racers)item.group.rotation.y=0;
   if(phase==='countdown')status.textContent='レース開始！位置について…';
   votePanel.hidden=!['preparation','voting','closed'].includes(phase);
+  votingLayout.hidden=votePanel.hidden;
   retryButton.disabled=!(phase==='result'||(phase==='closed'&&race.noVotes));
   refreshVoting();renderFlow(at);resize();
 }
@@ -773,29 +809,106 @@ function buildCourse(height) {
   }
   frameCourse();
 }
-function frameCourse() {
+function courseCameraView(votingView,aspect=camera.aspect) {
   const height=course.height;
   // 投票中は顔を見比べる視点。締め切り後はスタートとゴールを見渡す視点へ戻す。
-  const votingView=['preparation','voting','closed'].includes(race.state);
   const box=votingView
-    ? new THREE.Box3(new THREE.Vector3(-course.laneWidth*1.5-height*.9,0,-height*.65),new THREE.Vector3((racers.length-2.5)*course.laneWidth+height*.9,height*1.55,height*.8))
+    ? new THREE.Box3(new THREE.Vector3(-course.laneWidth*1.5-height*.72,height*.03,-height*.65),new THREE.Vector3((Math.max(1,racers.length)-2.5)*course.laneWidth+height*.72,height*1.18,height*.65))
     : new THREE.Box3(new THREE.Vector3(-course.laneWidth*2-height*1.6,0,-height*1.6),new THREE.Vector3(course.laneWidth*2+height*.8,height*1.8,course.length+height*1.6));
   const fov=THREE.MathUtils.degToRad(camera.fov);
-  const tanVertical=Math.tan(fov/2),tanHorizontal=tanVertical*camera.aspect;
-  const direction=(votingView ? new THREE.Vector3(0,.22,1) : new THREE.Vector3(1,1.2,.35)).normalize();
+  const tanVertical=Math.tan(fov/2),tanHorizontal=tanVertical*aspect;
+  const direction=(votingView ? new THREE.Vector3(0,.12,1) : new THREE.Vector3(1,1.2,.35)).normalize();
   const right=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),direction).normalize();
   const up=new THREE.Vector3().crossVectors(direction,right);
-  controls.target.copy(box.getCenter(new THREE.Vector3()));
+  const target=box.getCenter(new THREE.Vector3());
   // 球で大きく引く代わりに、実際の視点からコースの各隅が収まる最小距離を求める。
   let distance=0;
   for(const x of [box.min.x,box.max.x])for(const y of [box.min.y,box.max.y])for(const z of [box.min.z,box.max.z]) {
-    const point=new THREE.Vector3(x,y,z).sub(controls.target),depth=point.dot(direction);
+    const point=new THREE.Vector3(x,y,z).sub(target),depth=point.dot(direction);
     distance=Math.max(distance,depth+Math.abs(point.dot(right))/tanHorizontal,depth+Math.abs(point.dot(up))/tanVertical);
   }
   distance*=1.06;
-  camera.position.copy(controls.target).addScaledVector(direction,distance);
-  camera.near=height*.01;camera.far=distance*8;camera.updateProjectionMatrix();
-  controls.minDistance=height*4;controls.maxDistance=distance*2;controls.update();
+  return { target, position:target.clone().addScaledVector(direction,distance), distance };
+}
+function votingPreviewAngle(now) {
+  const time=Math.max(0,(now-votingPreview.startedAt)/1000);
+  const phase=time/votingPreviewConfig.swayCycleSeconds*Math.PI*2;
+  return THREE.MathUtils.degToRad(votingPreviewConfig.angleDegrees)*Math.sin(phase);
+}
+function votingPreviewVelocity(now) {
+  const frequency=Math.PI*2/votingPreviewConfig.swayCycleSeconds;
+  const time=Math.max(0,(now-votingPreview.startedAt)/1000);
+  return THREE.MathUtils.degToRad(votingPreviewConfig.angleDegrees)*frequency*Math.cos(time*frequency);
+}
+function closingPreviewHeading(initial,elapsed) {
+  const duration=votingTimerConfig.closingSeconds;
+  const settle=Math.min(votingPreviewConfig.settleSeconds,duration*.5);
+  // 締切時の角速度も引き継ぎ、まず短時間で減速してから向きを戻す。
+  const t=THREE.MathUtils.clamp(elapsed,0,settle),velocity=votingPreview.closingVelocity;
+  const carried=velocity*(t-t*t/(2*settle));
+  if(elapsed<settle)return initial+carried;
+  return (initial+carried)*(1-previewEase((elapsed-settle)/Math.max(.001,duration-settle)));
+}
+function updateVotingPanelLayout(now) {
+  if(race.state!=='closed'||race.noVotes)return; // 0票の案内・再投票ボタンは維持。
+  const elapsed=(now-race.phaseStartedAt)/1000;
+  const blend=previewEase((elapsed-votingPanelExitConfig.holdSeconds)/votingPanelExitConfig.slideSeconds);
+  const fullHeight=votePanel.getBoundingClientRect?.().height ?? 0;
+  // 外枠がレイアウトの高さを担い、内側だけを上へスライドさせる。
+  const height=fullHeight*(1-blend);
+  const value=`${height}px`;
+  if(votingLayout.style.height!==value) {
+    votingLayout.style.height=value;
+    votePanel.style.transform=`translateY(${-100*blend}%)`;
+    votePanel.style.opacity=String(1-blend);
+    votePanel.style.pointerEvents='none';
+    votingLayout.setAttribute('aria-hidden',String(blend>=1));
+    resize(); // 現在の表示領域に追従。独立したCSSタイマーやsetTimeoutを増やさない。
+  }
+}
+function votingPreviewHeading(item,now) {
+  const view=votingPreview.voteView;
+  if(!view)return 0;
+  // 各レーンからカメラに向く角度を正面とする。外側の子も顔を正面から比較できる。
+  return Math.atan2(view.position.x-item.group.position.x,view.position.z-item.group.position.z)+votingPreviewAngle(now);
+}
+function applyPreviewCamera(from,to,blend) {
+  camera.position.lerpVectors(from.position,to.position,blend);
+  controls.target.lerpVectors(from.target,to.target,blend);
+  camera.lookAt(controls.target);
+}
+function updateVotingPreview(now) {
+  if(!votingPreview.voteView||!votingPreview.raceView)return;
+  const comparing=race.state==='preparation'||race.state==='voting';
+  const closing=race.state==='closed';
+  controls.enabled=!(comparing||closing);
+  if(comparing) {
+    applyPreviewCamera(votingPreview.voteView,votingPreview.voteView,0);
+    for(const item of racers)item.group.rotation.y=votingPreviewHeading(item,now);
+  } else if(closing) {
+    const progress=(now-race.phaseStartedAt)/Math.max(1,votingTimerConfig.closingSeconds*1000);
+    const blend=previewEase(progress);
+    applyPreviewCamera(votingPreview.voteView,votingPreview.raceView,blend);
+    racers.forEach((item,index)=>{item.group.rotation.y=closingPreviewHeading(votingPreview.closingHeadings[index]??0,(now-race.phaseStartedAt)/1000);});
+  }
+}
+function frameCourse() {
+  // 高さを縮めても、補間の始点・終点は完全に開いた/閉じた構図から求める。
+  // 現在の縮み量を基準にしないことで、カメラの補間中の跳び・引き直しを防ぐ。
+  const viewportHeight=viewport.getBoundingClientRect?.().height ?? viewport.clientHeight;
+  const panelHeight=votePanel.hidden ? 0 : (votePanel.getBoundingClientRect?.().height ?? 0);
+  const layoutHeight=votingLayout.hidden ? 0 : (votingLayout.getBoundingClientRect?.().height ?? panelHeight);
+  const fullHeight=viewportHeight+layoutHeight;
+  const voteAspect=Math.max(1,viewport.clientWidth)/Math.max(1,fullHeight-panelHeight);
+  votingPreview.voteView=courseCameraView(true,voteAspect);
+  const raceAspect=Math.max(1,viewport.clientWidth)/Math.max(1,fullHeight);
+  votingPreview.raceView=courseCameraView(false,raceAspect);
+  const distance=Math.max(votingPreview.voteView.distance,votingPreview.raceView.distance);
+  camera.near=course.height*.01;camera.far=distance*8;camera.updateProjectionMatrix();
+  controls.minDistance=course.height*2;controls.maxDistance=distance*2;
+  if(['preparation','voting','closed'].includes(race.state))updateVotingPreview(performance.now());
+  else applyPreviewCamera(votingPreview.raceView,votingPreview.raceView,0);
+  controls.update();
 }
 function resetRace(now=performance.now()) {
   race.plans.clear();race.noVotes=false;voting.locked=null;
@@ -821,6 +934,8 @@ function showResults(now) {
 }
 function updateRace(now=performance.now(),visualDt=0) {
   syncFlow(now);
+  updateVotingPanelLayout(now);
+  updateVotingPreview(now);
   if(race.state==='racing') {
     const elapsed=Math.max(0,(now-race.raceStartedAt)/1000),span=Math.max(0,elapsed-race.elapsed);
     for(const item of racers) {
@@ -852,10 +967,13 @@ document.addEventListener('visibilitychange',resumeFlow);
 window.addEventListener('pageshow',resumeFlow);
 async function populateRace() {
   try {
-    const records=selectRaceEntrants(readRegisteredCharacters());
+    const selectedIds=readSelectedEntrantIds();
+    const records=selectRaceEntrants(readRegisteredCharacters(),selectedIds);
     if(!records.length) {
       race.state='empty';buildCourse(1);
-      status.textContent='まだ出走できる子がいないよ。「牧場に戻る」から顔を作って登録してね。';return;
+      status.textContent=selectedIds !== null
+        ? '選択された出走者が見つからなかったよ。「牧場に戻る」から選び直してね。'
+        : 'まだ出走できる子がいないよ。「牧場に戻る」から顔を作って登録してね。';return;
     }
     const required=new Set(records.flatMap(record=>partSlots.filter(slot=>record.parts[slot]?.exists===true).map(slot=>record.parts[slot].type)));
     const character=await loadTemplate('./assets/characters/tousokujin.glb');
