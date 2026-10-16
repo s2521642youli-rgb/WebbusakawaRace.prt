@@ -14,6 +14,8 @@ button:disabled { opacity:.45; cursor:default; }
 #viewport { position:relative; flex:1; min-height:180px; }
 canvas { display:block; width:100%; height:100%; }
 #countdown { position:absolute; top:35%; width:100%; text-align:center; font-size:72px; font-weight:bold; pointer-events:none; text-shadow:0 2px 6px white; }
+#winnerAnnouncement { position:absolute; top:16px; left:12px; right:12px; text-align:center; white-space:pre-line; font-size:clamp(18px,2.3vw,30px); font-weight:bold; padding:12px; border-radius:12px; background:#fff9; pointer-events:none; }
+#winnerAnnouncement[hidden] { display:none; }
 #results { position:absolute; left:14px; bottom:14px; padding:10px 14px; background:rgba(255,255,255,.9); border-radius:8px; }
 #results h2 { margin:0 0 6px; font-size:18px; } #ranking { margin:0; padding-left:0; list-style:none; line-height:1.7; }
 #votingLayout { flex-shrink:0; overflow:hidden; }
@@ -52,6 +54,7 @@ canvas { display:block; width:100%; height:100%; }
 </section>
 </div>
 <div id="viewport"><div id="countdown" role="status" aria-live="polite"></div>
+<div id="winnerAnnouncement" role="status" hidden></div>
 <section id="results" hidden><h2>レース結果</h2><ol id="ranking"></ol></section></div>
 <script type="module">
 import * as THREE from 'three';
@@ -62,6 +65,7 @@ import { clone as cloneWithSkeleton } from 'three/addons/utils/SkeletonUtils.js'
 const status=document.getElementById('raceStatus');
 const retryButton=document.getElementById('retry');
 const countdown=document.getElementById('countdown'), results=document.getElementById('results');
+const winnerAnnouncement=document.getElementById('winnerAnnouncement');
 const ranking=document.getElementById('ranking'), viewport=document.getElementById('viewport');
 const votingLayout=document.getElementById('votingLayout');
 const votePanel=document.getElementById('voting'),voteCards=document.getElementById('voteCards');
@@ -77,7 +81,16 @@ const previewEase = t => { t=THREE.MathUtils.clamp(t,0,1); return t*t*t*(t*(t*6-
 const raceCountdownSeconds=3;
 // 投票は一時状態のみ。登録済みキャラクターやlocalStorageには書き込まない。
 const voting={counts:new Map(),locked:null,views:new Map(),feedbackUntil:0};
-const votingRaceConfig={firstFinishSeconds:14,secondsPerRank:1.15};
+const votingRaceConfig={firstFinishSeconds:30,secondsPerRank:1.3,maxSpeedInHeights:3.2};
+// 距離はモデル全高に対する倍率。中心ルートの長さは4*halfStraight+2π*curveRadius。
+const trackConfig={halfStraight:3.8,curveRadius:4.8,width:6,laps:1,samples:256};
+// lateralStepは初期の間隔、lateralSpeedは横移動の目安、clearanceは接近時の最低中心間隔。
+const passingConfig={lateralStep:1.35,lateralSpeed:0.7,clearance:1.12};
+// 1体ごとの発生確率。イベントは時間をずらして計画し、最後の6秒には発生させない。
+const incidentConfig={probability:0.28,durations:{stumble:1.25,fall:2.6,roll:2.1},minGapSeconds:3};
+// 減速時間、ゴール後の間、優勝者へ近づく時間、その顔を見せる時間（秒）。
+const finishShowConfig={coastSeconds:2.1,pauseSeconds:1.6,zoomSeconds:2.4,revealSeconds:1.4};
+const raceCameraConfig={followPerSecond:1.5,overviewSeconds:2.5};
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0xdceef3);
 const camera=new THREE.PerspectiveCamera(40,1,.01,1000);
 const renderer=new THREE.WebGLRenderer({antialias:true});
@@ -88,8 +101,12 @@ const controls=new OrbitControls(camera,renderer.domElement);
 controls.enableDamping=true;controls.maxPolarAngle=Math.PI*.48;
 const storageKey='busakawaRace.characters.v1';
 const racers=[];
-const race={state:'loading',phaseStartedAt:0,deadline:null,raceStartedAt:null,noVotes:false,elapsed:0,finishers:[],plans:new Map()};
-const course={length:12,laneWidth:1.6,height:1};
+const raceCamera={manual:false};
+controls.addEventListener?.('start',()=>{if(race.state==='racing')raceCamera.manual=true;});
+const race={state:'loading',phaseStartedAt:0,deadline:null,raceStartedAt:null,noVotes:false,elapsed:0,finishers:[],plans:new Map(),presentationStartedAt:null,winners:[],finishView:null,winnerHeadings:[]};
+const course={length:12,lapLength:12,laneWidth:1.6,height:1,halfStraight:3.8,curveRadius:4.8,width:6};
+const trackObjects=new THREE.Group(),backgroundObjects=new THREE.Group();
+scene.add(backgroundObjects,trackObjects);
 let sharedFootContacts;
 const rigContactIndexCache=new WeakMap(), calibratedRigContacts=new WeakMap();
 const organicContactIndexCache=new WeakMap();
@@ -328,7 +345,7 @@ function createRaceCharacter(record, templates) {
   if (!sharedFootContacts) sharedFootContacts = collectFootContacts(character, surface);
   const label = makeNameLabel(record.name, surface.maxSize);
   label.position.set(0, surface.size.y + surface.maxSize * 0.3, 0);
-  group.add(label);
+  label.scale.x*=.8;group.add(label);
   const radius = Math.hypot(surface.size.x, surface.size.z) * 0.53;
   return { id: record.id, name: record.name, group, walkPivot, modelSpace,
     character, parts, surface, label, radius, legRig,
@@ -734,7 +751,7 @@ function enterPhase(phase,at) {
     }
   }
   if(phase==='racing') { race.raceStartedAt=at;race.elapsed=0;status.textContent='レース中！'; }
-  if(phase==='countdown'||phase==='racing') for(const item of racers)item.group.rotation.y=0;
+  if(phase==='countdown'||phase==='racing') for(const item of racers)item.group.rotation.y=trackPose(0).heading;
   if(phase==='countdown')status.textContent='レース開始！位置について…';
   votePanel.hidden=!['preparation','voting','closed'].includes(phase);
   votingLayout.hidden=votePanel.hidden;
@@ -758,29 +775,157 @@ function syncFlow(now=performance.now()) {
 // 順位から目標到達時刻を作る。同票には完全に同じ時刻を割り当てる。
 // 今後の演出はこの制約を保つペース曲線として追加できる。集計や投票値は変更しない。
 function createRacePlans(standings,random=Math.random) {
-  return new Map(standings.map(item=>[item.id,Object.freeze({
+  const plans=new Map(standings.map(item=>[item.id,{
     targetTime:votingRaceConfig.firstFinishSeconds+(item.rank-1)*votingRaceConfig.secondsPerRank,
-    pulse:.34+random()*.12,phase:random()*Math.PI*2
-  })]));
+    pulse:.34+random()*.12,phase:random()*Math.PI*2,
+    lateral:{amplitude:0,period:12,phase:0}
+  }]));
+  // 発生時刻を先に決め、待ち時間を織り込んだ速度曲線を正規化する。
+  let lastEnd=-Infinity;
+  const candidates=[...racers];
+  for(let i=candidates.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[candidates[i],candidates[j]]=[candidates[j],candidates[i]];}
+  for(const item of candidates) {
+    const plan=plans.get(item.id);
+    if(random()>=incidentConfig.probability)continue;
+    const kind=['stumble','fall','roll'][Math.min(2,Math.floor(random()*3))];
+    const duration=incidentConfig.durations[kind];
+    const start=Math.max(6+random()*10,lastEnd+incidentConfig.minGapSeconds);
+    if(start+duration>plan.targetTime-6)continue;
+    plan.event={kind,start,duration};lastEnd=start+duration;
+  }
+  const allowance=Math.max(0,...[...plans.values()].map(plan=>plan.event?.duration??0))*.7;
+  for(const plan of plans.values()){plan.targetTime+=allowance;buildRaceTimeline(plan);}
+  // 上限を超える計画は全員の時間軸ごと伸ばす。イベントも伸ばし、無理な追い上げを強行しない。
+  const peak=Math.max(...[...plans.values()].map(plan=>plan.timeline.speeds.reduce((maximum,value)=>Math.max(maximum,value),0)*course.length/plan.timeline.area));
+  const limit=course.height*votingRaceConfig.maxSpeedInHeights;
+  if(peak>limit) {
+    const stretch=peak/limit*1.01;
+    for(const plan of plans.values()) {
+      plan.targetTime*=stretch;
+      if(plan.event){plan.event.start*=stretch;plan.event.duration*=stretch;}
+      buildRaceTimeline(plan);
+    }
+  }
+  planPassingPaths(plans,random);
+  return plans;
 }
-// 正の滑らかな速度6u(1-u)*(1+pulse*sin(2πu+phase))を積分して正規化。
-// pulse<1なので逆走せず、始点/終点で速度0。途中のペースは毎レース変わるが到着時刻は厳守。
-function paceIntegral(u,plan) {
-  const k=Math.PI*2,angle=k*u+plan.phase;
-  const primitive=6*((u*u-u)*Math.cos(angle)/k+(1-2*u)*Math.sin(angle)/(k*k)-2*Math.cos(angle)/(k*k*k));
-  const origin=6*(Math.sin(plan.phase)/(k*k)-2*Math.cos(plan.phase)/(k*k*k));
-  return 3*u*u-2*u*u*u+plan.pulse*(primitive-origin);
+function lateralAt(item,plan,time) {
+  const margin=course.height*.65,limit=course.width/2-margin;
+  const motionTime=raceDistanceAt(plan,time)/course.length*plan.targetTime;
+  const window=previewEase(motionTime/4)*(1-previewEase((motionTime-(plan.targetTime-5))/5));
+  const shift=plan.lateral.amplitude*window*Math.sin(motionTime/plan.lateral.period*Math.PI*2+plan.lateral.phase);
+  return THREE.MathUtils.clamp(item.homeLateral+shift,-limit,limit);
+}
+function pathsHaveClearance(a,pa,b,pb) {
+  const clearance=course.height*(passingConfig.clearance+.15);
+  const end=Math.max(pa.targetTime,pb.targetTime);
+  for(let t=0;t<=end+.025;t+=.025) {
+    const ap=trackPose(raceDistanceAt(pa,t),lateralAt(a,pa,t));
+    const bp=trackPose(raceDistanceAt(pb,t),lateralAt(b,pb,t));
+    if(Math.hypot(ap.x-bp.x,ap.z-bp.z)<clearance)return false;
+  }
+  return true;
+}
+function planPassingPaths(plans,random) {
+  // 全員の時間軸を先に確認。接近中の横断は採用せず、空いている幅を滑らかに使う。
+  // 不成立ならその子だけ横移動を小さくする。移動順を直列化したり、順位を変えたりしない。
+  for(const item of racers) {
+    const plan=plans.get(item.id);
+    for(let attempt=0;attempt<18;attempt++) {
+      const period=10+random()*7;
+      const maxAmplitude=Math.min(course.width/2-course.height*.65-Math.abs(item.homeLateral),course.height*passingConfig.lateralSpeed*period/(Math.PI*2));
+      plan.lateral={amplitude:Math.min(maxAmplitude,course.height*(.25+random()*.95))*(attempt<12?1:.35),period,phase:random()*Math.PI*2};
+      if(racers.every(other=>other===item||pathsHaveClearance(item,plan,other,plans.get(other.id))))break;
+      plan.lateral={amplitude:0,period:12,phase:0};
+    }
+  }
+}
+// 正の速度曲線を積分した時刻表。接地・ハプニング・ゴール後の演出とは独立。
+function plannedSpeedWeight(plan,time) {
+  const u=THREE.MathUtils.clamp(time/plan.targetTime,0,1);
+  let weight=previewEase(u/.12)*(1-.6*previewEase((u-.8)/.2))*(1+plan.pulse*Math.sin(Math.PI*2*u+plan.phase));
+  const event=plan.event;
+  if(event&&time>=event.start&&time<=event.start+event.duration) {
+    const e=(time-event.start)/event.duration;
+    const envelope=previewEase(e/.18)*(1-previewEase((e-.75)/.25));
+    const reduction={stumble:.5,fall:1,roll:.65}[event.kind];
+    weight*=1-reduction*envelope;
+  }
+  return Math.max(0,weight);
+}
+function buildRaceTimeline(plan) {
+  const count=Math.ceil(plan.targetTime*120),step=plan.targetTime/count;
+  const values=new Float64Array(count+1),speeds=new Float64Array(count+1);
+  for(let i=0;i<=count;i++) {
+    speeds[i]=plannedSpeedWeight(plan,i*step);
+    if(i)values[i]=values[i-1]+(speeds[i-1]+speeds[i])*.5*step;
+  }
+  plan.timeline={values,speeds,step,area:values[count]};
+}
+function timelineSample(plan,time) {
+  const {values,speeds,step,area}=plan.timeline;
+  const scaled=THREE.MathUtils.clamp(time,0,plan.targetTime)/step;
+  const i=Math.min(values.length-2,Math.floor(scaled)),u=Math.min(1,scaled-i),u2=u*u,u3=u2*u;
+  const a=values[i],b=values[i+1],m0=speeds[i]*step,m1=speeds[i+1]*step;
+  const value=(2*u3-3*u2+1)*a+(u3-2*u2+u)*m0+(-2*u3+3*u2)*b+(u3-u2)*m1;
+  const speed=((6*u2-6*u)*a+(3*u2-4*u+1)*m0+(-6*u2+6*u)*b+(3*u2-2*u)*m1)/step;
+  return {fraction:value/area,speed:Math.max(0,speed)/area};
 }
 function raceDistanceAt(plan,time,length=course.length) {
   if(time<=0)return 0;
   if(time>=plan.targetTime)return length;
-  const u=time/plan.targetTime;
-  // 丸め誤差だけで目標時刻より早くラインに触れないよう、ごく微小な余白を残す。
-  return length*THREE.MathUtils.clamp(paceIntegral(u,plan)/paceIntegral(1,plan),0,1-1e-12);
+  return length*THREE.MathUtils.clamp(timelineSample(plan,time).fraction,0,1-1e-12);
+}
+function runnerDistanceAt(plan,time) {
+  if(time<=plan.targetTime)return raceDistanceAt(plan,time);
+  const duration=finishShowConfig.coastSeconds;
+  const u=THREE.MathUtils.clamp((time-plan.targetTime)/duration,0,1);
+  const speed=course.length*timelineSample(plan,plan.targetTime).speed;
+  return course.length+speed*duration*.5*(u+Math.sin(Math.PI*u)/Math.PI);
 }
 function currentRaceSpeed(item,time) {
-  const plan=race.plans.get(item.id),u=THREE.MathUtils.clamp(time/plan.targetTime,0,1);
-  return course.length/plan.targetTime*6*u*(1-u)*(1+plan.pulse*Math.sin(Math.PI*2*u+plan.phase))/paceIntegral(1,plan);
+  const plan=race.plans.get(item.id),base=course.length*timelineSample(plan,Math.min(time,plan.targetTime)).speed;
+  if(time<=plan.targetTime)return base;
+  const u=THREE.MathUtils.clamp((time-plan.targetTime)/finishShowConfig.coastSeconds,0,1);
+  return base*.5*(1+Math.cos(Math.PI*u));
+}
+function createIncidentRig(item) {
+  const pivot=new THREE.Group();pivot.name='incidentPivot';
+  item.group.remove(item.walkPivot);pivot.add(item.walkPivot);item.group.add(pivot);item.incidentPivot=pivot;
+  item.incidentMeshes=[];
+  item.modelSpace.traverse(mesh=>{if(mesh.isMesh)item.incidentMeshes.push(mesh);});
+}
+function resetIncidentVisual(item) {
+  item.incidentPivot.rotation.set(0,0,0);item.incidentPivot.position.set(0,0,0);
+}
+function applyIncidentVisual(item,plan,time) {
+  const event=plan.event;
+  if(!event||time<event.start||time>=event.start+event.duration)return;
+  const u=(time-event.start)/event.duration,h=item.surface.maxSize;
+  let pitch=0,roll=0;
+  if(event.kind==='stumble'){pitch=.42*Math.sin(Math.PI*u)**2;roll=.07*Math.sin(2*Math.PI*u)*Math.sin(Math.PI*u);}
+  if(event.kind==='fall') {
+    const wriggle=(u-.22)/.43;
+    pitch=u<.22?1.35*previewEase(u/.22):u<.65?1.35+.06*Math.sin(wriggle*Math.PI*4)*Math.sin(wriggle*Math.PI)**2:1.35*(1-previewEase((u-.65)/.35));
+    roll=.10*Math.sin(10*Math.PI*u)*Math.sin(Math.PI*u)**2;
+  }
+  if(event.kind==='roll'){pitch=Math.PI*2*previewEase(u);roll=.06*Math.sin(Math.PI*4*u)*Math.sin(Math.PI*u);}
+  const pivot=item.incidentPivot;pivot.rotation.set(pitch,0,roll);pivot.updateMatrix();
+  const center=new THREE.Vector3(0,h*.6,0);
+  pivot.position.copy(center).sub(center.clone().applyQuaternion(pivot.quaternion));
+  // 短い転倒中だけ現在のスキニング後頂点から接地点を取る。
+  // 通常走行は従来の少数の足裏点を使い、GLBやメッシュは再生成しない。
+  item.group.updateMatrixWorld(true);
+  let minY=Infinity;const point=new THREE.Vector3();
+  for(const mesh of item.incidentMeshes) {
+    mesh.skeleton?.update();
+    for(let i=0;i<mesh.geometry.attributes.position.count;i++) {
+      mesh.getVertexPosition(i,point).applyMatrix4(mesh.matrixWorld);
+      minY=Math.min(minY,point.y);
+    }
+  }
+  pivot.position.y+=-minY+h*.002*Math.sin(Math.PI*u)**2;
+
 }
 function actualStandings(finishers) {
   const sorted=[...finishers].sort((a,b)=>a.finishTime-b.finishTime||a.id-b.id);
@@ -791,33 +936,56 @@ function actualStandings(finishers) {
     return {item,rank};
   });
 }
+// 中心ルートの進行距離と、幅方向のオフセットは独立。内外で順位判定は変わらない。
+function trackPose(distance,lateral=0) {
+  const a=course.halfStraight,r=course.curveRadius,L=4*a+2*Math.PI*r;
+  let d=((distance%L)+L)%L,x,z,tx,tz;
+  if(d<a){x=d;z=r;tx=1;tz=0;}
+  else if((d-=a)<Math.PI*r){const t=d/r;x=a+r*Math.sin(t);z=r*Math.cos(t);tx=Math.cos(t);tz=-Math.sin(t);}
+  else if((d-=Math.PI*r)<2*a){x=a-d;z=-r;tx=-1;tz=0;}
+  else if((d-=2*a)<Math.PI*r){const t=d/r;x=-a-r*Math.sin(t);z=-r*Math.cos(t);tx=-Math.cos(t);tz=Math.sin(t);}
+  else{d-=Math.PI*r;x=-a+d;z=r;tx=1;tz=0;}
+  return {x:x-tz*lateral,z:z+tx*lateral,tx,tz,heading:Math.atan2(tx,tz)};
+}
+function placeOnTrack(item,distance,lateral=item.lateral??0) {
+  const pose=trackPose(distance,lateral);
+  item.group.position.set(pose.x,0,pose.z);
+  item.group.rotation.y=pose.heading;
+}
+function trackRibbon(inner,outer,color,y) {
+  const vertices=[];
+  for(let i=0;i<trackConfig.samples;i++) {
+    const d0=i/trackConfig.samples*course.lapLength,d1=(i+1)/trackConfig.samples*course.lapLength;
+    const a=trackPose(d0,inner),b=trackPose(d0,outer),c=trackPose(d1,outer),d=trackPose(d1,inner);
+    for(const p of [a,b,c,a,c,d])vertices.push(p.x,y,p.z);
+  }
+  const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(vertices,3));geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry,new THREE.MeshStandardMaterial({color,roughness:1,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:y>0?-2:-1,polygonOffsetUnits:y>0?-2:-1}));
+}
 function buildCourse(height) {
-  course.height=height;course.length=height*12;course.laneWidth=height*1.6;
-  const width=course.laneWidth*4, material=color=>new THREE.MeshStandardMaterial({color,roughness:1});
-  function strip(x,z,w,length,color,y=-.002) {
-    const mesh=new THREE.Mesh(new THREE.PlaneGeometry(w,length),material(color));
-    mesh.rotation.x=-Math.PI/2;mesh.position.set(x,y,z);scene.add(mesh);
-  }
-  strip(0,course.length/2,width+height*2,course.length+height*4,0xb4ce91,-.008);
-  for(let lane=0;lane<4;lane++)strip((lane-1.5)*course.laneWidth,course.length/2,course.laneWidth,course.length+height*2,lane%2?0xd7c7a3:0xe5d7b8);
-  for(let line=0;line<=4;line++)strip((line-2)*course.laneWidth,course.length/2,height*.035,course.length+height*2,0xffffff,0);
-  strip(0,0,width,height*.09,0xffffff,.001);
-  strip(0,course.length,width,height*.12,0x304734,.002);
-  // コース上の文字も3D空間に固定。DOMの進行状態とは独立する。
-  for(const [text,z] of [['START',-height*.8],['GOAL',course.length+height]]) {
-    const label=makeNameLabel(text,height);label.visible=true;label.position.set(-width/2-height*.7,height*.5,z);scene.add(label);
-  }
+  course.height=height;course.halfStraight=height*trackConfig.halfStraight;course.curveRadius=height*trackConfig.curveRadius;
+  course.width=height*trackConfig.width;course.laneWidth=height*passingConfig.lateralStep;
+  course.lapLength=4*course.halfStraight+2*Math.PI*course.curveRadius;course.length=course.lapLength*trackConfig.laps;
+  const grass=new THREE.Mesh(new THREE.PlaneGeometry((course.halfStraight+course.curveRadius+course.width)*2,(course.curveRadius+course.width)*2),new THREE.MeshStandardMaterial({color:0xb4ce91,roughness:1}));
+  grass.rotation.x=-Math.PI/2;grass.position.y=-.04*height;backgroundObjects.add(grass);
+  trackObjects.add(trackRibbon(-course.width/2,course.width/2,0xe5d7b8,0));
+  for(const side of [-1,1])trackObjects.add(trackRibbon(side*course.width/2-height*.025,side*course.width/2+height*.025,0xffffff,height*.002));
+  const line=new THREE.Mesh(new THREE.PlaneGeometry(height*.09,course.width),new THREE.MeshStandardMaterial({color:0xffffff,roughness:1}));
+  line.rotation.x=-Math.PI/2;line.position.set(0,height*.004,course.curveRadius);trackObjects.add(line);
+  const label=makeNameLabel('START / GOAL',height);label.visible=true;label.position.set(-height,height*.45,course.curveRadius+course.width/2+height*.5);trackObjects.add(label);
   frameCourse();
 }
 function courseCameraView(votingView,aspect=camera.aspect) {
   const height=course.height;
   // 投票中は顔を見比べる視点。締め切り後はスタートとゴールを見渡す視点へ戻す。
+  const offsets=racers.map(item=>item.homeLateral??0);
+  const low=Math.min(0,...offsets),high=Math.max(0,...offsets);
   const box=votingView
-    ? new THREE.Box3(new THREE.Vector3(-course.laneWidth*1.5-height*.72,height*.03,-height*.65),new THREE.Vector3((Math.max(1,racers.length)-2.5)*course.laneWidth+height*.72,height*1.18,height*.65))
-    : new THREE.Box3(new THREE.Vector3(-course.laneWidth*2-height*1.6,0,-height*1.6),new THREE.Vector3(course.laneWidth*2+height*.8,height*1.8,course.length+height*1.6));
+    ? new THREE.Box3(new THREE.Vector3(-height*.65,height*.03,course.curveRadius+low-height*.72),new THREE.Vector3(height*.65,height*1.18,course.curveRadius+high+height*.72))
+    : new THREE.Box3(new THREE.Vector3(-course.halfStraight-course.curveRadius-course.width/2-height,0,-course.curveRadius-course.width/2-height),new THREE.Vector3(course.halfStraight+course.curveRadius+course.width/2+height,height*1.8,course.curveRadius+course.width/2+height));
   const fov=THREE.MathUtils.degToRad(camera.fov);
   const tanVertical=Math.tan(fov/2),tanHorizontal=tanVertical*aspect;
-  const direction=(votingView ? new THREE.Vector3(0,.12,1) : new THREE.Vector3(1,1.2,.35)).normalize();
+  const direction=(votingView ? new THREE.Vector3(1,.12,0) : new THREE.Vector3(.35,1.15,1)).normalize();
   const right=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),direction).normalize();
   const up=new THREE.Vector3().crossVectors(direction,right);
   const target=box.getCenter(new THREE.Vector3());
@@ -829,6 +997,29 @@ function courseCameraView(votingView,aspect=camera.aspect) {
   }
   distance*=1.06;
   return { target, position:target.clone().addScaledVector(direction,distance), distance };
+}
+function cameraViewForBox(box,target,direction,aspect=camera.aspect,minimumDistance=course.height*4) {
+  const right=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),direction).normalize();
+  const up=new THREE.Vector3().crossVectors(direction,right),tan=Math.tan(THREE.MathUtils.degToRad(camera.fov)/2);
+  let distance=minimumDistance;
+  for(const x of [box.min.x,box.max.x])for(const y of [box.min.y,box.max.y])for(const z of [box.min.z,box.max.z]) {
+    const p=new THREE.Vector3(x,y,z).sub(target);
+    distance=Math.max(distance,p.dot(direction)+Math.abs(p.dot(right))/(tan*aspect),p.dot(direction)+Math.abs(p.dot(up))/tan);
+  }
+  return {target,position:target.clone().addScaledVector(direction,distance*1.08)};
+}
+function updateRaceCamera(now,dt) {
+  if(race.state!=='racing'||raceCamera.manual||!racers.length)return;
+  const elapsed=(now-race.raceStartedAt)/1000,h=course.height;
+  const bounds=new THREE.Box3();
+  for(const item of racers){const p=item.group.position;bounds.expandByPoint(new THREE.Vector3(p.x-h*.9,0,p.z-h*.9));bounds.expandByPoint(new THREE.Vector3(p.x+h*.9,h*1.5,p.z+h*.9));}
+  const leader=racers.reduce((a,b)=>a.progressDistance>b.progressDistance?a:b);
+  const target=bounds.getCenter(new THREE.Vector3()).lerp(leader.group.position.clone().add(new THREE.Vector3(0,h*.65,0)),.2);
+  const desired=cameraViewForBox(bounds,target,new THREE.Vector3(.35,1.15,1).normalize());
+  const overview=votingPreview.raceView,blend=previewEase((elapsed-raceCameraConfig.overviewSeconds)/3);
+  desired.position.lerpVectors(overview.position,desired.position,blend);desired.target.lerpVectors(overview.target,desired.target,blend);
+  const alpha=1-Math.exp(-raceCameraConfig.followPerSecond*Math.max(0,dt));
+  camera.position.lerp(desired.position,alpha);controls.target.lerp(desired.target,alpha);camera.lookAt(controls.target);
 }
 function votingPreviewAngle(now) {
   const time=Math.max(0,(now-votingPreview.startedAt)/1000);
@@ -847,7 +1038,8 @@ function closingPreviewHeading(initial,elapsed) {
   const t=THREE.MathUtils.clamp(elapsed,0,settle),velocity=votingPreview.closingVelocity;
   const carried=velocity*(t-t*t/(2*settle));
   if(elapsed<settle)return initial+carried;
-  return (initial+carried)*(1-previewEase((elapsed-settle)/Math.max(.001,duration-settle)));
+  const target=trackPose(0).heading;
+  return target+(initial+carried-target)*(1-previewEase((elapsed-settle)/Math.max(.001,duration-settle)));
 }
 function updateVotingPanelLayout(now) {
   if(race.state!=='closed'||race.noVotes)return; // 0票の案内・再投票ボタンは維持。
@@ -881,7 +1073,7 @@ function updateVotingPreview(now) {
   if(!votingPreview.voteView||!votingPreview.raceView)return;
   const comparing=race.state==='preparation'||race.state==='voting';
   const closing=race.state==='closed';
-  controls.enabled=!(comparing||closing);
+  controls.enabled=!(comparing||closing||race.state==='finishing');
   if(comparing) {
     applyPreviewCamera(votingPreview.voteView,votingPreview.voteView,0);
     for(const item of racers)item.group.rotation.y=votingPreviewHeading(item,now);
@@ -904,56 +1096,92 @@ function frameCourse() {
   const raceAspect=Math.max(1,viewport.clientWidth)/Math.max(1,fullHeight);
   votingPreview.raceView=courseCameraView(false,raceAspect);
   const distance=Math.max(votingPreview.voteView.distance,votingPreview.raceView.distance);
-  camera.near=course.height*.01;camera.far=distance*8;camera.updateProjectionMatrix();
+  camera.near=course.height*.08;camera.far=Math.max(course.height*100,distance*4);camera.updateProjectionMatrix();
   controls.minDistance=course.height*2;controls.maxDistance=distance*2;
   if(['preparation','voting','closed'].includes(race.state))updateVotingPreview(performance.now());
-  else applyPreviewCamera(votingPreview.raceView,votingPreview.raceView,0);
+  else if(!['finishing','result'].includes(race.state))applyPreviewCamera(votingPreview.raceView,votingPreview.raceView,0);
   controls.update();
 }
 function resetRace(now=performance.now()) {
-  race.plans.clear();race.noVotes=false;voting.locked=null;
+  race.plans.clear();race.noVotes=false;voting.locked=null;raceCamera.manual=false;
   voting.counts=new Map(racers.map(item=>[item.id,0]));
-  race.elapsed=0;race.raceStartedAt=null;race.finishers=[];
+  race.elapsed=0;race.raceStartedAt=null;race.finishers=[];race.presentationStartedAt=null;race.winners=[];race.finishView=null;
+  winnerAnnouncement.hidden=true;winnerAnnouncement.textContent='';
   countdown.textContent='';results.hidden=true;ranking.replaceChildren();
   for(const item of racers) {
-    item.group.position.set((item.lane-1.5)*course.laneWidth,0,0);item.group.rotation.set(0,0,0);
+    item.homeLateral=((racers.length-1)/2-item.lane)*course.laneWidth;
+    item.lateral=item.homeLateral;item.progressDistance=0;item.displayDistance=0;
+    placeOnTrack(item,0);
     item.finishTime=null;item.raceSpeed=0;item.behavior.phase=item.lane*Math.PI*.37;item.behavior.weight=0;
-    resetRunMotion(item);updateWalkVisual(item,0,0);item.label.visible=true;
+    resetIncidentVisual(item);resetRunMotion(item);updateWalkVisual(item,0,0);item.label.visible=true;
   }
   createVotingCards();lastFrameTime=now;enterPhase('preparation',now);
 }
+function beginFinishShow(at) {
+  race.state='finishing';race.phaseStartedAt=at;race.deadline=null;race.presentationStartedAt=at;
+  race.winners=actualStandings(race.finishers).filter(row=>row.rank===1).map(row=>row.item);
+  race.winnerHeadings=race.winners.map(item=>item.group.rotation.y);
+  race.finishView={position:camera.position.clone(),target:controls.target.clone()};
+  retryButton.disabled=true;status.textContent='全員ゴール！結果発表を待ってね。';
+}
 function showResults(now) {
-  enterPhase('result',now);results.hidden=false;
+  race.state='result';race.phaseStartedAt=now;race.deadline=null;results.hidden=false;retryButton.disabled=false;controls.enabled=true;
   ranking.replaceChildren();
   for(const {item,rank} of actualStandings(race.finishers)) {
     const row=document.createElement('li');
     const votes=voting.locked.find(result=>result.id===item.id).votes;
     row.textContent=`${rank}位　${item.name}　${votes}票`;ranking.appendChild(row);
   }
-  status.textContent='全員ゴール！投票結果とゴール順位を発表！「もう一度」で準備から再開できるよ。';
+  status.textContent='投票結果とゴール順位を発表！「もう一度」で同じ子たちと再投票できるよ。';
+}
+function updateRunnerMotion(item,elapsed,span,visualDt) {
+  const plan=race.plans.get(item.id);resetIncidentVisual(item);
+  const oldPosition=item.group.position.clone(),next=runnerDistanceAt(plan,elapsed);
+  item.lateral=lateralAt(item,plan,elapsed);item.displayDistance=next;item.progressDistance=Math.min(course.length,next);
+  const pose=trackPose(next,item.lateral);item.group.position.set(pose.x,0,pose.z);
+  item.raceSpeed=currentRaceSpeed(item,elapsed);
+  if(item.raceSpeed>1e-5) {
+    const epsilon=.015;
+    const before=trackPose(runnerDistanceAt(plan,Math.max(0,elapsed-epsilon)),lateralAt(item,plan,Math.max(0,elapsed-epsilon)));
+    const after=trackPose(runnerDistanceAt(plan,elapsed+epsilon),lateralAt(item,plan,elapsed+epsilon));
+    const heading=Math.atan2(after.x-before.x,after.z-before.z);
+    item.group.rotation.y+=Math.atan2(Math.sin(heading-item.group.rotation.y),Math.cos(heading-item.group.rotation.y));
+  }
+  if(item.finishTime===null&&elapsed>=plan.targetTime) {item.finishTime=plan.targetTime;race.finishers.push(item);}
+  const dt=span>.2?visualDt:span;
+  const distance=span>.2?item.raceSpeed*dt:item.group.position.distanceTo(oldPosition);
+  updateWalkVisual(item,distance,dt);applyIncidentVisual(item,plan,elapsed);
+}
+function updateFinishShow(now) {
+  const elapsed=Math.max(0,(now-race.presentationStartedAt)/1000);
+  if(elapsed<finishShowConfig.pauseSeconds) {countdown.textContent='ゴール！';return;}
+  countdown.textContent='';winnerAnnouncement.hidden=false;
+  winnerAnnouncement.textContent=(race.winners.length>1?'みんなが今回のぶさかわNo.1！':'今回のぶさかわNo.1！')+'\n'+race.winners.map(item=>item.name).join('・');
+  const h=course.height,box=new THREE.Box3();
+  for(const item of race.winners) {
+    const p=item.group.position;box.expandByPoint(new THREE.Vector3(p.x-h*.7,h*.03,p.z-h*.7));box.expandByPoint(new THREE.Vector3(p.x+h*.7,h*1.4,p.z+h*.7));
+  }
+  const view=cameraViewForBox(box,box.getCenter(new THREE.Vector3()),new THREE.Vector3(1,.14,.18).normalize(),camera.aspect,course.height*2.3);
+  const blend=previewEase((elapsed-finishShowConfig.pauseSeconds)/finishShowConfig.zoomSeconds);
+  applyPreviewCamera(race.finishView,view,blend);
+  race.winners.forEach((item,i)=>{
+    const from=race.winnerHeadings[i],target=Math.atan2(view.position.x-item.group.position.x,view.position.z-item.group.position.z);
+    item.group.rotation.y=from+Math.atan2(Math.sin(target-from),Math.cos(target-from))*blend;
+  });
+  if(elapsed>=finishShowConfig.pauseSeconds+finishShowConfig.zoomSeconds+finishShowConfig.revealSeconds)showResults(now);
 }
 function updateRace(now=performance.now(),visualDt=0) {
-  syncFlow(now);
-  updateVotingPanelLayout(now);
-  updateVotingPreview(now);
-  if(race.state==='racing') {
+  syncFlow(now);updateVotingPanelLayout(now);updateVotingPreview(now);
+  if(race.state==='racing'||race.state==='finishing') {
     const elapsed=Math.max(0,(now-race.raceStartedAt)/1000),span=Math.max(0,elapsed-race.elapsed);
-    for(const item of racers) {
-      let distance=0;
-      if(item.finishTime===null) {
-        const plan=race.plans.get(item.id),previous=item.group.position.z,next=raceDistanceAt(plan,elapsed);
-        distance=Math.max(0,next-previous);item.group.position.z=next;
-        item.raceSpeed=currentRaceSpeed(item,elapsed);
-        if(previous<course.length&&next>=course.length) {
-          item.finishTime=plan.targetTime;race.finishers.push(item);
-        }
-      }
-      // 非表示中の移動は解析曲線で追いつく。見えない長時間を巨大な足運びとして再生しない。
-      const dt=span>.2?visualDt:span;
-      updateWalkVisual(item,span>.2?item.raceSpeed*dt:distance,dt);
-    }
+    for(const item of racers)updateRunnerMotion(item,elapsed,span,visualDt);
     race.elapsed=elapsed;
-    if(race.finishers.length===racers.length)showResults(now);
+    if(race.state==='racing'&&race.finishers.length===racers.length) {
+      const at=race.raceStartedAt+Math.max(...race.finishers.map(item=>item.finishTime))*1000;
+      beginFinishShow(at);
+    }
+    if(race.state==='finishing')updateFinishShow(now);
+    else updateRaceCamera(now,visualDt);
   } else if(race.state==='result') {
     for(const item of racers)updateWalkVisual(item,0,visualDt);
   }
@@ -981,7 +1209,7 @@ async function populateRace() {
     for(const [lane,record] of records.entries()) {
       const item=createRaceCharacter(record,{character,parts});
       item.lane=lane;item.raceSpeed=0;item.finishTime=null;
-      racers.push(item);scene.add(item.group);
+      createIncidentRig(item);racers.push(item);scene.add(item.group);
     }
     buildCourse(Math.max(...racers.map(item=>item.surface.maxSize)));resetRace();
   } catch(error) {
