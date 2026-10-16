@@ -87,7 +87,9 @@ const randomBetween=range=>range[0]+Math.random()*(range[1]-range[0]);
 const partSettings = {
   eye_01: { path: './assets/eyes/eye_01.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
   eye_02: { path: './assets/eyes/eye_02.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
-  mouth_01: { path: './assets/mouths/mouth_01.glb', sizeMultiplier: 0.55, fixedDepth: -0.1 }
+  mouth_01: { path: './assets/mouths/mouth_01.glb', sizeMultiplier: 0.55, fixedDepth: -0.1 },
+  mouth_02: { path: './assets/mouths/mouth_02.glb', sizeMultiplier: 1.10, fixedDepth: -0.13, depthLocked: true },
+  mouth_03: { path: './assets/mouths/mouth_03.glb', sizeMultiplier: 0.715, fixedDepth: -0.16, depthLocked: true }
 };
 const partSlots = ['eye_01', 'eye_02', 'mouth_01'];
 const walkConfig = {
@@ -258,7 +260,7 @@ function restorePart(template, saved, surface) {
   group.updateMatrixWorld(true);
   const rearDepth = Math.max(0, -new THREE.Box3().setFromObject(group).min.z);
   const pose = surface.placement(saved.x, saved.y, saved.rotation,
-    scaledSize.x * 0.5, scaledSize.y * 0.5, rearDepth, settings.fixedDepth);
+    scaledSize.x * 0.5, scaledSize.y * 0.5, rearDepth, settings.depthLocked ? settings.fixedDepth : (Number.isFinite(saved.depth) ? saved.depth : settings.fixedDepth));
   if (!pose) throw new Error(`${saved.type}の保存位置に頭の表面が見つからなかったよ。`);
   group.position.copy(pose.position);
   group.quaternion.copy(pose.quaternion);

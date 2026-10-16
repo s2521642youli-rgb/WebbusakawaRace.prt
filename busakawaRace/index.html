@@ -84,6 +84,16 @@
       font-size: 12px;
       color: #777777;
     }
+    [hidden] { display: none !important; }
+    .choiceGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin:10px 0; }
+    .choiceGrid button, #resetPart { padding:10px 6px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
+    .choiceGrid button[aria-pressed="true"] { background:#ffdf83; border-color:#b78822; font-weight:bold; }
+    #categoryChoices button { font-size:18px; }
+    #modelChoices { max-height:150px; overflow:auto; }
+    #partControls details { margin-top:14px; border-top:1px solid #ddd; padding-top:12px; }
+    #partControls summary { cursor:pointer; }
+    #partControls input[type="checkbox"] { width:auto; }
+    .controlRow { margin-bottom:10px; }
   </style>
 
   <script type="importmap">
@@ -113,18 +123,25 @@
     <p id="registrationStatus" role="status" aria-live="polite"></p>
   </div>
 
-  <div class="section">
+  <div id="categoryChoices" class="choiceGrid" aria-label="カテゴリ"></div>
+  <div id="slotChoices" class="choiceGrid" aria-label="編集する場所"></div>
+  <p class="note">編集する場所を選んでから、使うモデルを選んでね。</p>
+  <div id="modelChoices" class="choiceGrid" aria-label="使うモデル"></div>
+  <p id="partStatus" class="note" role="status"></p>
+  <div id="selectedEditor"></div>
+  <button id="resetPart" type="button">位置・角度・浮き具合をリセット</button>
+  <details><summary>ArUco連携の設定</summary>
     <h3>ArUco連携</h3>
-    <label><input type="checkbox" id="arucoEnabled" checked
+    <label><input type="checkbox" id="arucoEnabled"
       style="width: auto;"> マーカーの動きを反映する</label>
     <p id="arucoStatus" class="note" role="status">接続準備中</p>
-    <p class="note">OFFにすると手動で調整できるよ。</p>
-  </div>
+    <p class="note">初期状態は手動操作。ONでマーカーを反映するよ。モデルを選ぶと手動プレビューに戻るよ。</p>
+  </details>
 
   <!-- 目 -->
   <div class="section">
 
-    <h3>目の位置調整</h3>
+    <h3>目①の調整</h3>
 
     <div class="controlRow">
       <label>
@@ -166,17 +183,16 @@
 
     <div class="controlRow">
       <label>
-        浮き具合（固定）：
+        浮き具合：
         <span id="eyeDepthValue">-0.10</span>
       </label>
 
-      <input
+      <input id="eyeDepth"
         type="range"
         min="-0.15"
         max="0.15"
         step="0.01"
         value="-0.10"
-        disabled
       >
     </div>
 
@@ -206,7 +222,7 @@
     </div>
 
     <div class="controlRow">
-      <label>浮き具合（固定）：<span id="eye02DepthValue">-0.10</span></label>
+      <label>浮き具合：<span id="eye02DepthValue">-0.10</span></label>
       <input type="range" id="eye02Depth"
         min="-0.15" max="0.15" step="0.01" value="-0.10" disabled>
     </div>
@@ -271,7 +287,6 @@
         max="0.20"
         step="0.01"
         value="-0.10"
-        disabled
        >
     </div>
 
@@ -291,6 +306,8 @@ import * as THREE from 'three';
 
 import { GLTFLoader } from
   'three/addons/loaders/GLTFLoader.js';
+
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
 import { OrbitControls } from
   'three/addons/controls/OrbitControls.js';
@@ -387,7 +404,7 @@ let headMinY;
 // パーツごとの設定
 // ========================================
 
-// 顔パーツごとのモデル・サイズ・固定沈み量。
+// 顔パーツごとのモデル・サイズ・初期沈み量。
 // 計測済みを想定した仮データ。実際のArUco計測値ではない。
 // X・Yはスライダーと同じ尺度へ変換済みの座標を使う。
 const measuredEye02Coordinates = { x: 0.4, y: 0.1 };
@@ -416,6 +433,69 @@ const partSettings = {
 
 };
 
+
+// モデルを追加する場所。ファイルがあるモデルだけカテゴリに登録する。
+partSettings.mouth_02 = { path:'./assets/mouths/mouth_02.glb', sizeMultiplier:1.10, fixedDepth:-0.13, depthLocked:true };
+partSettings.mouth_03 = { path:'./assets/mouths/mouth_03.glb', sizeMultiplier:0.715, fixedDepth:-0.16, depthLocked:true };
+const partCategories = {
+  eyes: { label:'目', slots:['eye_01','eye_02'], models:['eye_01','eye_02'] },
+  mouth: { label:'口', slots:['mouth_01'], models:['mouth_01','mouth_02','mouth_03'] }
+};
+// スロットはArUco ID・保存キーと対応し、モデルの種類とは独立。
+const slotChoices = {
+  eye_01:{ label:'目①', type:'eye_01', enabled:true, setter:'setEye01Coordinates' },
+  eye_02:{ label:'目②', type:'eye_02', enabled:true, setter:'setEye02Coordinates' },
+  mouth_01:{ label:'口', type:'mouth_01', enabled:true, setter:'setMouthCoordinates' }
+};
+const partEditors = new Map();
+const modelTemplates = new Map();
+function loadPartTemplate(type) {
+  if (!modelTemplates.has(type)) {
+    const promise = loader.loadAsync(partSettings[type].path).then(gltf => gltf.scene);
+    modelTemplates.set(type, promise);
+    promise.catch(() => { if (modelTemplates.get(type) === promise) modelTemplates.delete(type); });
+  }
+  return modelTemplates.get(type);
+}
+let selectedCategory = 'eyes', selectedSlot = 'eye_01';
+const partStatus = document.getElementById('partStatus');
+const editorPanels = {};
+for (const [slot, slider] of Object.entries({eye_01:'eyeX', eye_02:'eye02X', mouth_01:'mouthX'})) {
+  const panel = document.getElementById(slider).closest('.section');
+  editorPanels[slot] = panel;
+  document.getElementById('selectedEditor').append(panel);
+}
+function choiceButton(label, selected, action) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.textContent = label;
+  button.setAttribute('aria-pressed', String(selected));
+  button.addEventListener('click', action);
+  return button;
+}
+function renderPartEditor() {
+  document.getElementById('categoryChoices').replaceChildren(...Object.entries(partCategories).map(([key, category]) =>
+    choiceButton(category.label, key === selectedCategory, () => {
+      selectedCategory = key; selectedSlot = category.slots[0]; renderPartEditor();
+    })));
+  const category = partCategories[selectedCategory];
+  document.getElementById('slotChoices').replaceChildren(...category.slots.map(slot =>
+    choiceButton(slotChoices[slot].label, slot === selectedSlot, () => { selectedSlot = slot; renderPartEditor(); })),
+    choiceButton(category.label + 'なし', category.slots.every(slot => !slotChoices[slot].enabled), () => {
+      category.slots.forEach(slot => { slotChoices[slot].enabled = false; slotChoices[slot].revision = (slotChoices[slot].revision ?? 0) + 1; }); updateArucoVisibility(); renderPartEditor();
+    }));
+  const choice = slotChoices[selectedSlot];
+  document.getElementById('modelChoices').replaceChildren(
+    choiceButton('なし', !choice.enabled, () => { choice.enabled = false; choice.revision = (choice.revision ?? 0) + 1; updateArucoVisibility(); renderPartEditor(); }),
+    ...category.models.map(type => choiceButton(type, choice.enabled && choice.type === type, async () => {
+      const editor = partEditors.get(selectedSlot);
+      if (!editor) { partStatus.textContent = 'モデルを読み込み中だよ。少し待ってね。'; return; }
+      await editor.selectModel(type);
+      renderPartEditor();
+    })));
+  for (const [slot, panel] of Object.entries(editorPanels)) panel.hidden = slot !== selectedSlot;
+}
+document.getElementById('resetPart').addEventListener('click', () => partEditors.get(selectedSlot)?.reset());
+renderPartEditor();
 
 // 有効に配置できた状態だけを保持する。取得結果はコピーなので外部変更されない。
 const facePartStates = {};
@@ -499,7 +579,8 @@ function captureCharacterSnapshot() {
   for (const [type, setterName] of Object.entries(bindings)) {
     const state = facePartStates[type];
     parts[type] = {
-      type,
+      type: slotChoices[type].type,
+      depth: state.depth,
       x: state.x,
       y: state.y,
       rotation: state.rotation,
@@ -573,10 +654,11 @@ let arucoDetectedCount = 0;
 function updateArucoVisibility(now = performance.now()) {
   for (const [setterName, group] of arucoPartGroups) {
     const lastSeen = arucoLastSeen.get(setterName);
-    group.visible = !arucoEnabled.checked || (
+    const choice = Object.values(slotChoices).find(item => item.setter === setterName);
+    group.visible = choice.enabled && (!arucoEnabled.checked || (
       arucoConnected && arucoPlacedParts.has(setterName) &&
       lastSeen !== undefined && now - lastSeen < arucoConfig.lostGraceMs
-    );
+    ));
   }
 }
 
@@ -794,7 +876,7 @@ loader.load(
       'eye_01',
       'eyeX',
       'eyeY',
-      null,
+      'eyeDepth',
       'eyeRotation'
     );
 
@@ -1055,13 +1137,10 @@ function loadFacePart(
 
   const settings = partSettings[partName];
 
-  loader.load(
+  loadPartTemplate(partName).then((template) => {
 
-    settings.path,
-
-    (gltf) => {
-
-      const part = gltf.scene;
+      let part = cloneSkeleton(template);
+      let activeModelType = partName;
 
 
       // ========================================
@@ -1136,15 +1215,15 @@ function loadFacePart(
       const centeredBox =
         new THREE.Box3().setFromObject(partGroup);
 
-      const rearDepth = Math.max(
+      let rearDepth = Math.max(
         0,
         -centeredBox.min.z
       );
 
-      const halfWidth =
+      let halfWidth =
         scaledSize.x * 0.5;
 
-      const halfHeight =
+      let halfHeight =
         scaledSize.y * 0.5;
 
 
@@ -1164,12 +1243,18 @@ function loadFacePart(
 
 
       const rotationSlider = document.getElementById(rotationSliderId);
-      const state = { x: Number(xSlider.value), y: Number(ySlider.value), rotation: 0 };
+      const state = { x: Number(xSlider.value), y: Number(ySlider.value), rotation: 0, depth: -0.1 };
 
       function syncControls() {
         xSlider.value = String(state.x);
         ySlider.value = String(state.y);
         rotationSlider.value = String(state.rotation);
+        if (depthSlider) {
+          depthSlider.disabled = partSettings[activeModelType].depthLocked === true;
+          depthSlider.title = depthSlider.disabled ? 'このモデルの沈み具合は固定だよ' : '浮き具合を調整';
+          depthSlider.value = String(state.depth);
+          document.getElementById(depthSliderId + 'Value').textContent = state.depth.toFixed(2);
+        }
         document.getElementById(xSliderId + 'Value').textContent = state.x.toFixed(2);
         document.getElementById(ySliderId + 'Value').textContent = state.y.toFixed(2);
         document.getElementById(rotationSliderId + 'Value').textContent =
@@ -1189,7 +1274,7 @@ function loadFacePart(
       // ★ 位置・回転・埋め込み量を更新
       // ========================================
 
-      function updatePartPosition(x, y, rotationDeg = state.rotation, depth = 0) {
+      function updatePartPosition(x, y, rotationDeg = state.rotation, depth = state.depth) {
 
         if (
           ![x, y, rotationDeg, depth].every(Number.isFinite)
@@ -1233,13 +1318,11 @@ function loadFacePart(
         const minimumOffset = surfaceCache.minimumOffset;
 
         // --------------------------------
-        // パーツごとの埋め込み量
+        // パーツごとの埋め込み量（初期値 -0.1）
         // --------------------------------
 
-        const actualDepth =
-          settings.fixedDepth !== null
-            ? settings.fixedDepth
-            : depth;
+        const activeSettings = partSettings[activeModelType];
+        const actualDepth = activeSettings.depthLocked ? activeSettings.fixedDepth : depth;
 
         const rotation = rotationDeg >= -180 && rotationDeg <= 180
           ? rotationDeg
@@ -1268,7 +1351,7 @@ function loadFacePart(
         localRotation.setFromAxisAngle(forward, THREE.MathUtils.degToRad(rotation));
         partGroup.quaternion.copy(orientation).multiply(localRotation);
 
-        Object.assign(state, { x, y, rotation });
+        Object.assign(state, { x, y, rotation, depth: actualDepth });
         facePartStates[partName] = state;
         syncControls();
 
@@ -1292,9 +1375,7 @@ function loadFacePart(
           ? Number(rotationSlider.value) : state.rotation;
 
         const depth =
-          settings.fixedDepth !== null
-            ? settings.fixedDepth
-            : Number(depthSlider?.value ?? 0);
+          Number(depthSlider?.value ?? state.depth);
 
 
         // --------------------------------
@@ -1387,6 +1468,54 @@ function loadFacePart(
       // 初期配置
       // ========================================
 
+      partEditors.set(partName, {
+        async selectModel(type) {
+          const choice = slotChoices[partName];
+          const revision = choice.revision = (choice.revision ?? 0) + 1;
+          partStatus.textContent = `${type}を読み込み中…`;
+          try {
+            const template = await loadPartTemplate(type);
+            if (revision !== choice.revision) return;
+            const replacement = cloneSkeleton(template);
+            const bounds = new THREE.Box3().setFromObject(replacement);
+            const size = bounds.getSize(new THREE.Vector3());
+            const max = Math.max(size.x, size.y, size.z);
+            if (!(max > 0)) throw new Error('モデルの大きさを取得できない');
+            replacement.scale.multiplyScalar(headRadius * partSettings[type].sizeMultiplier / max);
+            const scaled = new THREE.Box3().setFromObject(replacement);
+            const dimensions = scaled.getSize(new THREE.Vector3());
+            replacement.position.sub(scaled.getCenter(new THREE.Vector3()));
+            replacement.updateMatrixWorld(true);
+            const centered = new THREE.Box3().setFromObject(replacement);
+            const old = { part, rearDepth, halfWidth, halfHeight, activeModelType };
+            activeModelType = type;
+            rearDepth = Math.max(0, -centered.min.z);
+            halfWidth = dimensions.x / 2; halfHeight = dimensions.y / 2;
+            surfaceCache.revision = -1;
+            if (!updatePartPosition(state.x, state.y, state.rotation, state.depth)) {
+              ({part, rearDepth, halfWidth, halfHeight, activeModelType} = old);
+              surfaceCache.revision = -1;
+              updatePartPosition(state.x, state.y, state.rotation, state.depth);
+              throw new Error('この位置には配置できない');
+            }
+            partGroup.remove(part); part = replacement; partGroup.add(part);
+            choice.type = type; choice.enabled = true;
+            syncControls();
+            // 手動選択したモデルは、マーカーなしでもその場で確認する。
+            if (arucoEnabled.checked) { arucoEnabled.checked = false; clearArucoTracking(); updateArucoStatus(); }
+            updateArucoVisibility();
+            partStatus.textContent = `${type}を表示中（手動プレビュー）`;
+          } catch (error) {
+            if (revision === choice.revision) partStatus.textContent = `${type}を読み込めなかったよ。ファイルと配置を確認してね。`;
+            console.error(error);
+          }
+        },
+        reset() {
+          const defaults = { eye_01:[-0.4,0.1], eye_02:[0.4,0.1], mouth_01:[0,-0.35] }[partName];
+          updatePartPosition(...defaults, 0, -0.1);
+        }
+      });
+
       // 計測済み座標の仮データも、手動操作と同じ配置処理へ渡す。
       if (settings.initialCoordinates) {
         xSlider.value = String(settings.initialCoordinates.x);
@@ -1399,20 +1528,10 @@ function loadFacePart(
         message.textContent = `${partName}を読み込みました！`;
       }
 
-    },
-
-    undefined,
-
-    (error) => {
-
+    }).catch((error) => {
       console.error(error);
-
-      message.textContent =
-        `${partName}の読み込みに失敗しました`;
-
-    }
-
-  );
+      partStatus.textContent = `${partName}の読み込みに失敗したよ。ファイルを確認してね。`;
+    });
 
 }
 
