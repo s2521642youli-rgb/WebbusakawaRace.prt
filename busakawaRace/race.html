@@ -5,6 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ぶさかわレース</title>
 <style>
+[hidden] { display:none !important; }
+input,select { font:inherit; max-width:100%; }
+#adminPanel { position:relative; margin-left:auto; z-index:20; }
+#adminPanel summary { cursor:pointer; padding:7px 12px; border-radius:7px; background:#e5ebdf; font-size:13px; }
+.adminBody { position:absolute; top:100%; right:0; width:min(420px,85vw); max-height:70dvh; overflow:auto; padding:16px; background:#fffffff5; box-shadow:0 5px 24px #30473444; border-radius:10px; }
+.adminBody label { display:block; margin:10px 0; } .adminBody button { margin:4px 0; }
+#qrPanel { position:fixed; top:72px; right:12px; z-index:5; padding:5px; background:#fff; border-radius:8px; text-align:center; box-shadow:0 2px 8px #30473418; }
+#qrPanel strong { display:block; font-size:11px; line-height:16px; }
+#qrExpand { display:block; padding:0; margin:3px 0 0; background:white; border-radius:3px; }
+#qrPanel canvas { width:128px !important; height:128px !important; margin:0; }
+#qrExpand:focus-visible { outline:3px solid #b78822; outline-offset:2px; }
+#qrDialog { border:0; border-radius:12px; padding:18px; max-width:90vw; max-height:90dvh; text-align:center; }
+#qrDialog::backdrop { background:#0009; }
+#qrDialog h2 { font-size:20px; margin:0 0 12px; }
+#qrDialog canvas { width:min(65vw,58dvh,420px) !important; height:auto !important; aspect-ratio:1; margin:12px auto; }
+#qrDialog p { font-size:14px; margin:8px 0; }
+#voting.onlineVoting { padding-right:156px; }
+@media(max-width:700px),(max-height:600px) { #qrPanel { right:6px; padding:4px; } #qrPanel canvas { width:104px !important; height:104px !important; } #qrPanel strong { font-size:10px; } #voting.onlineVoting { padding-right:126px; } }
+#voting.onlineVoting #voteCards,#voting.onlineVoting #voteFeedback { display:none; }
+#voting { min-height:90px; }
+#voting h2,#phaseMessage { display:inline-block; margin-right:12px; }
+#phaseTimer { display:inline-block; }
+
+#onlineHost input { width:240px; }
 body { height:100dvh; display:flex; flex-direction:column; overflow:hidden; margin:0; font-family:sans-serif; color:#304734; background:#dceef3; }
 header { flex-shrink:0; padding:12px 18px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; background:#fff; }
 h1 { margin:0 12px 0 0; font-size:22px; }
@@ -45,6 +69,17 @@ canvas { display:block; width:100%; height:100%; }
 <h1>ぶさかわレース</h1>
 <button id="retry" disabled>もう一度</button>
 <a href="./pasture.html">牧場に戻る</a>
+<details id="adminPanel"><summary>管理設定</summary><div class="adminBody">
+<label>投票方式 <select id="votingMode"><option value="online">スマホ投票（Cloudflare）</option><option value="local">PC内投票（テスト用）</option></select></label>
+<label>ハプニング <select id="incidentMode"><option value="normal">通常（2〜3回）</option><option value="test">演出テスト（3種類）</option></select></label>
+<div id="onlineHost" hidden>
+<label>Workers URL <input id="apiOrigin" type="url" placeholder="https://busakawa-voting.example.workers.dev"></label>
+<label>管理トークン <input id="adminToken" type="password" autocomplete="off"></label>
+<button id="connectVoting">受付を作成／通信再試行</button>
+<button id="startOnline" disabled>投票進行スタート！</button>
+<a id="voteLink" target="_blank" rel="noopener">投票ページ（管理用）</a>
+<p id="onlineStatus" role="status">接続設定を開いて、受付を作成してね。</p>
+</div></div></details>
 <p id="raceStatus" role="status">コースを準備しているよ…</p>
 </header>
 <div id="votingLayout" hidden>
@@ -55,15 +90,34 @@ canvas { display:block; width:100%; height:100%; }
 <button id="skipPreparation" type="button" title="開発用：準備時間だけを省略する" hidden>準備をスキップ</button>
 </section>
 </div>
-<div id="viewport"><div id="countdown" role="status" aria-live="polite"></div>
+<div id="viewport"><aside id="qrPanel" hidden aria-label="スマホで投票"><strong>スマホで投票</strong>
+<button id="qrExpand" type="button" aria-label="QRコードを拡大" aria-haspopup="dialog" title="クリックで拡大"><canvas id="voteQr" hidden></canvas></button></aside><div id="countdown" role="status" aria-live="polite"></div>
 <div id="winnerAnnouncement" role="status" hidden></div>
 <section id="results" hidden><h2>レース結果</h2><ol id="ranking"></ol></section></div>
+<dialog id="qrDialog" aria-labelledby="qrDialogTitle"><h2 id="qrDialogTitle">スマホで投票</h2>
+<canvas id="largeVoteQr" aria-label="拡大した投票用QRコード"></canvas><p>スマホのカメラで読み取ってね</p><button id="qrClose" type="button" autofocus>閉じる</button></dialog>
 <script type="module">
+import {HostClient} from './cloudflare/public/host-client.js';
+import {toCanvas} from './cloudflare/public/vendor/qr-code.js';
+import {partSettings,partSlots} from './js/parts-config.js';
+import {createModelCache} from './js/model-cache.js';
+import {readPartAdjustment,adjustedPartBounds,applyPartAdjustment} from './js/part-adjustment.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { clone as cloneWithSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
+const qrDialog=document.getElementById('qrDialog');
+document.getElementById('qrExpand').addEventListener('click',async()=>{
+  const panel=document.getElementById('qrPanel'),url=document.getElementById('voteLink').href;
+  if(panel.hidden||!url||!['registration','preparation','voting'].includes(race.state))return;
+  try{
+    await toCanvas(document.getElementById('largeVoteQr'),url,{width:512,margin:4});
+    if(!panel.hidden&&!qrDialog.open&&document.getElementById('voteLink').href===url&&['registration','preparation','voting'].includes(race.state))qrDialog.showModal();
+  }catch(error){onlineError(error);}
+});
+document.getElementById('qrClose').addEventListener('click',()=>qrDialog.close());
+qrDialog.addEventListener('click',event=>{if(event.target===qrDialog){const box=qrDialog.getBoundingClientRect();if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom)qrDialog.close();}});
 const status=document.getElementById('raceStatus');
 const retryButton=document.getElementById('retry');
 const skipPreparationButton=document.getElementById('skipPreparation');
@@ -74,6 +128,9 @@ const votingLayout=document.getElementById('votingLayout');
 const votePanel=document.getElementById('voting'),voteCards=document.getElementById('voteCards');
 const voteHeading=document.getElementById('voteHeading');
 const phaseMessage=document.getElementById('phaseMessage'),phaseTimer=document.getElementById('phaseTimer'),voteFeedback=document.getElementById('voteFeedback');
+const votingMode=document.getElementById('votingMode'),onlineHost=document.getElementById('onlineHost');
+const onlineStatus=document.getElementById('onlineStatus'),startOnline=document.getElementById('startOnline');
+const online={enabled:votingMode.value==='online',client:null,snapshot:null,clock:null,failed:false,applied:false,round:0};
 const votingTimerConfig={preparationSeconds:10,votingSeconds:15,closingSeconds:5};
 // 正面では止まらず、左右端で自然に減速する同期した往復回転。
 const votingPreviewConfig = { angleDegrees:45, swayCycleSeconds:9, settleSeconds:0.35 };
@@ -89,8 +146,13 @@ const votingRaceConfig={firstFinishSeconds:30,secondsPerRank:1.3,maxSpeedInHeigh
 const trackConfig={halfStraight:3.8,curveRadius:4.8,width:6,laps:1,samples:256};
 // lateralStepは初期の間隔、lateralSpeedは横移動の目安、clearanceは接近時の最低中心間隔。
 const passingConfig={lateralStep:1.35,lateralSpeed:0.7,clearance:1.12};
-// 1体ごとの発生確率。イベントは時間をずらして計画し、最後の6秒には発生させない。
-const incidentConfig={probability:0.28,durations:{stumble:1.25,fall:2.6,roll:2.1},minGapSeconds:3,recoverySeconds:2.4};
+// レース全体で安全区間と回復時間を確保してハプニングを事前計画する。
+const incidentConfig={
+  countRange:[2,3], // レース全体の回数。毎フレームの抽選は行わない。
+  weights:{stumble:.40,fall:.35,roll:.25},
+  durations:{stumble:1.25,fall:2.6,roll:2.1},
+  startSafeSeconds:4,finishSafeSeconds:6,minGapSeconds:3,recoverySeconds:2.4
+};
 // 減速時間、ゴール後の間、優勝者へ近づく時間、その顔を見せる時間（秒）。
 const finishShowConfig={coastSeconds:2.1,pauseSeconds:1.6,zoomSeconds:2.4,revealSeconds:1.4};
 const raceCameraConfig={followPerSecond:1.5,overviewSeconds:2.5};
@@ -115,14 +177,7 @@ const rigContactIndexCache=new WeakMap(), calibratedRigContacts=new WeakMap();
 const organicContactIndexCache=new WeakMap();
 const randomBetween=range=>range[0]+Math.random()*(range[1]-range[0]);
 // 顔復元・ボーン複製・接地補正はpasture.htmlと同じ処理。保存データへの書き込みは行わない。
-const partSettings = {
-  eye_01: { path: './assets/eyes/eye_01.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
-  eye_02: { path: './assets/eyes/eye_02.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
-  mouth_01: { path: './assets/mouths/mouth_01.glb', sizeMultiplier: 0.55, fixedDepth: -0.1 },
-  mouth_02: { path: './assets/mouths/mouth_02.glb', sizeMultiplier: 1.10, fixedDepth: -0.13, depthLocked: true },
-  mouth_03: { path: './assets/mouths/mouth_03.glb', sizeMultiplier: 0.715, fixedDepth: -0.16, depthLocked: true }
-};
-const partSlots = ['eye_01', 'eye_02', 'mouth_01'];
+
 const walkConfig = {
   speedInHeights: [0.28, 0.46],
   walkSeconds: [2.5, 6],
@@ -197,13 +252,7 @@ function readRegisteredCharacters() {
 
 // GLBは種類ごとに1回だけ読み込み、個体は骨を含めて複製する。
 const loader = new GLTFLoader();
-const modelTemplates = new Map();
-function loadTemplate(path) {
-  if (!modelTemplates.has(path)) {
-    modelTemplates.set(path, loader.loadAsync(path).then((gltf) => gltf.scene));
-  }
-  return modelTemplates.get(path);
-}
+const loadTemplate=createModelCache(loader);
 
 // 計算は生成時だけ。制作画面と同じ座標系の中で復元してから個体全体を移動する。
 function createHeadSurface(character) {
@@ -289,12 +338,16 @@ function restorePart(template, saved, surface) {
   group.name = saved.type;
   group.add(part);
   group.updateMatrixWorld(true);
-  const rearDepth = Math.max(0, -new THREE.Box3().setFromObject(group).min.z);
+  const adjustment=readPartAdjustment(saved,settings);
+  const bounds=adjustedPartBounds(new THREE.Box3().setFromObject(group),adjustment.scale,adjustment.tilt);
+  const adjustedSize=bounds.getSize(new THREE.Vector3());
+  const rearDepth = Math.max(0, -bounds.min.z);
   const pose = surface.placement(saved.x, saved.y, saved.rotation,
-    scaledSize.x * 0.5, scaledSize.y * 0.5, rearDepth, settings.depthLocked ? settings.fixedDepth : (Number.isFinite(saved.depth) ? saved.depth : settings.fixedDepth));
+    adjustedSize.x * 0.5, adjustedSize.y * 0.5, rearDepth, settings.depthLocked ? settings.fixedDepth : (Number.isFinite(saved.depth) ? saved.depth : settings.fixedDepth));
   if (!pose) throw new Error(`${saved.type}の保存位置に頭の表面が見つからなかったよ。`);
   group.position.copy(pose.position);
   group.quaternion.copy(pose.quaternion);
+  applyPartAdjustment(group,adjustment.scale,adjustment.tilt);
   return group;
 }
 
@@ -686,12 +739,12 @@ function castVote(id,now=performance.now()) {
   syncFlow(now);
   updateVotingPanelLayout(now);
   updateVotingPreview(now);
-  if(race.state!=='voting'||now>=race.deadline||!voting.counts.has(id))return;
+  if(online.enabled||race.state!=='voting'||now>=race.deadline||!voting.counts.has(id))return;
   voting.counts.set(id,voting.counts.get(id)+1);
   voting.feedbackUntil=now+900;renderFlow(now);
 }
 function refreshVoting() {
-  const open=race.state==='voting';
+  const open=!online.enabled&&race.state==='voting';
   for(const view of voting.views.values())view.button.disabled=!open;
 }
 function createVotingCards() {
@@ -715,9 +768,21 @@ function getFlowSnapshot(now=performance.now()) {
 function setFlowText(element,text) { if(element.textContent!==text)element.textContent=text; }
 function renderFlow(now) {
   const flow=getFlowSnapshot(now),left=flow.remainingSeconds;
-  skipPreparationButton.hidden=flow.phase!=='preparation'||!racers.length;
+  votePanel.classList.toggle?.('onlineVoting',online.enabled);
+  const qr=document.getElementById('qrPanel');
+  qr.hidden=!online.enabled||!online.snapshot||!['registration','preparation','voting','closed'].includes(flow.phase)||race.noVotes;
+  const qrExit=flow.phase==='closed'?previewEase(((now-race.phaseStartedAt)/1000-votingPanelExitConfig.holdSeconds)/votingPanelExitConfig.slideSeconds):0;
+  qr.style.opacity=String(1-qrExit);qr.style.transform=`translateY(${-24*qrExit}px)`;
+  qr.style.pointerEvents=qrExit>0?'none':'';
+  if(qrExit>=1)qr.hidden=true;
+  if((qr.hidden||flow.phase==='closed')&&qrDialog.open)qrDialog.close();
+  document.getElementById('incidentMode').disabled=!['registration','preparation','voting','result','closed'].includes(flow.phase)||voting.locked!==null;
+
+  skipPreparationButton.hidden=online.enabled||flow.phase!=='preparation'||!racers.length;
   skipPreparationButton.disabled=skipPreparationButton.hidden;
   const messages={
+    registration:['参加者受付中！','QRコードを読み取って、スマホで待っていてね。',''],
+    online_wait:['通信・確定票を確認中','未確認の集計でレースを開始しないよ。通信を確認してね。',''],
     preparation:['まもなく投票開始！','出走するぶさかわをチェック！',`投票開始まで あと${left}秒`],
     voting:['投票受付中！','一番ぶさかわだと思う子に投票しよう！',`投票終了まで あと${left}秒`],
     closed:race.noVotes?['投票がありませんでした','もう一度投票してください。「もう一度」で準備から再開できます。','']
@@ -758,12 +823,13 @@ function enterPhase(phase,at) {
   if(phase==='racing') { race.raceStartedAt=at;race.elapsed=0;status.textContent='レース中！'; }
   if(phase==='countdown'||phase==='racing') for(const item of racers)item.group.rotation.y=trackPose(0).heading;
   if(phase==='countdown')status.textContent='レース開始！位置について…';
-  votePanel.hidden=!['preparation','voting','closed'].includes(phase);
+  votePanel.hidden=!['registration','online_wait','preparation','voting','closed'].includes(phase);
   votingLayout.hidden=votePanel.hidden;
   retryButton.disabled=!(phase==='result'||(phase==='closed'&&race.noVotes));
   refreshVoting();renderFlow(at);resize();
 }
 function syncFlow(now=performance.now()) {
+  if(online.enabled){syncOnlineFlow(now);renderFlow(now);return;}
   // 締切から次の締切を作る。非表示から戻った場合も、遅れを加算せず一度ずつ遷移する。
   while(race.deadline!==null&&now>=race.deadline) {
     const at=race.deadline;
@@ -785,20 +851,26 @@ function createRacePlans(standings,random=Math.random) {
     pulse:.34+random()*.12,phase:random()*Math.PI*2,
     lateral:{amplitude:0,period:12,phase:0}
   }]));
-  // 発生時刻を先に決め、待ち時間を織り込んだ速度曲線を正規化する。
-  let lastEnd=-Infinity;
-  const candidates=[...racers];
-  for(let i=candidates.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[candidates[i],candidates[j]]=[candidates[j],candidates[i]];}
-  for(const item of candidates) {
-    const plan=plans.get(item.id);
-    if(random()>=incidentConfig.probability)continue;
-    const kind=['stumble','fall','roll'][Math.min(2,Math.floor(random()*3))];
-    const duration=incidentConfig.durations[kind];
-    const start=Math.max(6+random()*10,lastEnd+incidentConfig.minGapSeconds);
-    if(start+duration>plan.targetTime-6)continue;
-    plan.event={kind,start,duration};lastEnd=start+duration;
+  // 回数・対象・種類・時刻を締切時に計画。演出テストでも同じ安全条件を使う。
+  const test=document.getElementById('incidentMode').value==='test';
+  const count=test?3:incidentConfig.countRange[0]+Math.floor(random()*(incidentConfig.countRange[1]-incidentConfig.countRange[0]+1));
+  const kinds=['stumble','fall','roll'];
+  for(let i=kinds.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[kinds[i],kinds[j]]=[kinds[j],kinds[i]];}
+  let lastId=null,lastEnd=incidentConfig.startSafeSeconds;
+  for(const plan of plans.values())plan.events=[];
+  for(let i=0;i<count;i++) {
+    const eligible=racers.filter(item=>plans.has(item.id)&&(racers.length===1||item.id!==lastId));
+    const item=eligible[Math.floor(random()*eligible.length)];if(!item)break;
+    let kind=kinds[i];
+    if(!test){const value=random(),w=incidentConfig.weights;kind=value<w.stumble?'stumble':value<w.stumble+w.fall?'fall':'roll';}
+    const duration=incidentConfig.durations[kind],start=lastEnd+(i?incidentConfig.minGapSeconds:0)+random()*.8;
+    const recoveryEnd=start+duration*.75+Math.max(incidentConfig.recoverySeconds,duration*.25);
+    if(recoveryEnd>Math.min(...[...plans.values()].map(p=>p.targetTime))-incidentConfig.finishSafeSeconds)break;
+    plans.get(item.id).events.push({kind,start,duration});lastId=item.id;lastEnd=start+duration;
   }
-  const allowance=Math.max(0,...[...plans.values()].map(plan=>plan.event?.duration??0))*.7;
+  // 同じ個体に2回発生しても、ロスの総量を全員の到着時刻へ先に織り込む。
+  const allowance=Math.max(0,...[...plans.values()].map(plan=>plan.events.reduce((sum,event)=>sum+event.duration,0)))*.7;
+  for(const plan of plans.values())plan.event=plan.events[0]; // 旧開発ツール用の先頭イベント参照
   for(const plan of plans.values()){plan.targetTime+=allowance;buildRaceTimeline(plan);}
   // 上限を超える計画は全員の時間軸ごと伸ばす。イベントも伸ばし、無理な追い上げを強行しない。
   const peak=Math.max(...[...plans.values()].map(plan=>plan.timeline.speeds.reduce((maximum,value)=>Math.max(maximum,value),0)*course.length/plan.timeline.area));
@@ -807,7 +879,7 @@ function createRacePlans(standings,random=Math.random) {
     const stretch=peak/limit*1.01;
     for(const plan of plans.values()) {
       plan.targetTime*=stretch;
-      if(plan.event){plan.event.start*=stretch;plan.event.duration*=stretch;}
+      for(const event of plan.events){event.start*=stretch;event.duration*=stretch;}
       buildRaceTimeline(plan);
     }
   }
@@ -853,8 +925,7 @@ function plannedSpeedWeight(plan,time) {
   // ペース差の収束を早めに始め、追い上げを長い時間に分散する。
   const variation=1-previewEase((u-votingRaceConfig.paceFadeStart)/(votingRaceConfig.paceFadeEnd-votingRaceConfig.paceFadeStart));
   let weight=previewEase(u/.12)*(1+plan.pulse*Math.sin(Math.PI*2*u+plan.phase)*variation);
-  const event=plan.event;
-  if(event&&time>=event.start) {
+  for(const event of plan.events??(plan.event?[plan.event]:[]))if(time>=event.start) {
     // 姿勢を立て直した後も、速度は最低2.4秒かけて滑らかに回復させる。
     const recoveryStart=event.start+event.duration*.75;
     const recoveryDuration=Math.max(incidentConfig.recoverySeconds,event.duration*.25);
@@ -910,8 +981,8 @@ function resetIncidentVisual(item) {
   item.incidentPivot.rotation.set(0,0,0);item.incidentPivot.position.set(0,0,0);
 }
 function applyIncidentVisual(item,plan,time) {
-  const event=plan.event;
-  if(!event||time<event.start||time>=event.start+event.duration)return;
+  const event=(plan.events??(plan.event?[plan.event]:[])).find(event=>time>=event.start&&time<event.start+event.duration);
+  if(!event)return;
   const u=(time-event.start)/event.duration,h=item.surface.maxSize;
   let pitch=0,roll=0;
   if(event.kind==='stumble'){pitch=.42*Math.sin(Math.PI*u)**2;roll=.07*Math.sin(2*Math.PI*u)*Math.sin(Math.PI*u);}
@@ -1082,7 +1153,7 @@ function applyPreviewCamera(from,to,blend) {
 }
 function updateVotingPreview(now) {
   if(!votingPreview.voteView||!votingPreview.raceView)return;
-  const comparing=race.state==='preparation'||race.state==='voting';
+  const comparing=['registration','online_wait','preparation','voting'].includes(race.state);
   const closing=race.state==='closed';
   controls.enabled=!(comparing||closing||race.state==='finishing');
   if(comparing) {
@@ -1109,7 +1180,7 @@ function frameCourse() {
   const distance=Math.max(votingPreview.voteView.distance,votingPreview.raceView.distance);
   camera.near=course.height*.08;camera.far=Math.max(course.height*100,distance*4);camera.updateProjectionMatrix();
   controls.minDistance=course.height*2;controls.maxDistance=distance*2;
-  if(['preparation','voting','closed'].includes(race.state))updateVotingPreview(performance.now());
+  if(['registration','online_wait','preparation','voting','closed'].includes(race.state))updateVotingPreview(performance.now());
   else if(!['finishing','result'].includes(race.state))applyPreviewCamera(votingPreview.raceView,votingPreview.raceView,0);
   controls.update();
 }
@@ -1126,7 +1197,14 @@ function resetRace(now=performance.now()) {
     item.finishTime=null;item.raceSpeed=0;item.behavior.phase=item.lane*Math.PI*.37;item.behavior.weight=0;
     resetIncidentVisual(item);resetRunMotion(item);updateWalkVisual(item,0,0);item.label.visible=true;
   }
-  createVotingCards();lastFrameTime=now;enterPhase('preparation',now);
+  createVotingCards();lastFrameTime=now;
+  online.snapshot=null;online.applied=false;online.failed=false;online.round++;
+  onlineHost.hidden=!online.enabled;votingMode.disabled=false;
+  if(online.enabled){votingPreview.startedAt=now;enterPhase('registration',now);
+    votingLayout.style.height='';votePanel.style.transform='';votePanel.style.opacity='';votePanel.style.pointerEvents='';
+    votingLayout.setAttribute('aria-hidden','false');startOnline.disabled=true;
+    if(online.client)createOnlineRound();
+  }else enterPhase('preparation',now);
 }
 function beginFinishShow(at) {
   race.state='finishing';race.phaseStartedAt=at;race.deadline=null;race.presentationStartedAt=at;
@@ -1143,6 +1221,7 @@ function showResults(now) {
     const votes=voting.locked.find(result=>result.id===item.id).votes;
     row.textContent=`${rank}位　${item.name}　${votes}票`;ranking.appendChild(row);
   }
+  if(online.enabled)online.client?.publish(race.finishers.map(item=>({id:item.id,time:item.finishTime})));
   status.textContent='投票結果とゴール順位を発表！「もう一度」で同じ子たちと再投票できるよ。';
 }
 function updateRunnerMotion(item,elapsed,span,visualDt) {
@@ -1200,11 +1279,79 @@ function updateRace(now=performance.now(),visualDt=0) {
 // フェーズと締切を確認してから一度だけ進める。投票15秒は押した時刻から丸ごと確保。
 skipPreparationButton.addEventListener('click',()=>{
   const now=performance.now();syncFlow(now);
-  if(race.state==='preparation'&&racers.length)enterPhase('voting',now);
+  if(!online.enabled&&race.state==='preparation'&&racers.length)enterPhase('voting',now);
 });
 retryButton.addEventListener('click',()=>{
-  if(race.state==='result'||(race.state==='closed'&&race.noVotes))resetRace();
+  if(race.state==='result'||(race.state==='closed'&&race.noVotes)||online.failed)resetRace();
 });
+
+// Online adapter: server deadlines control voting; the existing track/motion/goal code stays unchanged.
+function onlineError(error){
+  onlineStatus.textContent='通信を確認できなかったよ。'+error.message;
+  if(race.state==='result')status.textContent='PCの結果は確定済み。スマホへの結果公開は通信を再試行中だよ。';
+  if(error.code==='race_changed'||error.status===401){online.failed=true;startOnline.disabled=true;retryButton.disabled=false;}
+}
+async function createOnlineRound(){
+  startOnline.disabled=true;onlineStatus.textContent='新しい受付を作成中…';
+  try{await online.client.create(racers.map(item=>({id:item.id,name:item.name})));}catch(error){onlineError(error);}
+}
+function receiveOnlineState(snapshot,clock){
+  if(!online.enabled)return;
+  online.snapshot=snapshot;online.clock=clock;
+  startOnline.disabled=snapshot.phase!=='registration'||online.failed;
+  votingMode.disabled=!['registration','result','no_votes'].includes(snapshot.phase);
+  onlineStatus.textContent=snapshot.phase==='result'?'結果をスマホへ公開したよ。':'Cloudflare接続中：'+snapshot.phase;
+  if(snapshot.phase==='result'&&race.state==='result')status.textContent='投票結果とゴール順位を発表！スマホにも結果を公開したよ。';
+  const link=document.getElementById('voteLink'),url=online.client.api.base+'/vote.html?raceId='+encodeURIComponent(snapshot.raceId);
+  if(link.href!==url){link.href=url;link.textContent='投票ページ（管理用）';const qr=document.getElementById('voteQr');qr.hidden=false;toCanvas(qr,url,{width:192,margin:2}).catch(onlineError);}
+  syncOnlineFlow(performance.now());
+}
+function syncOnlineFlow(now){
+  if(!online.snapshot||online.failed||['racing','finishing','result'].includes(race.state))return;
+  const state=online.snapshot,d=state.deadlines;
+  if(state.phase==='cancelled'){online.failed=true;enterPhase('online_wait',now);onlineError(new Error('このレースは中止されたよ。'));retryButton.disabled=false;return;}
+  if(!d)return;
+  const at=epoch=>online.clock.toPerformance(epoch);
+  const prep=at(d.preparationEndsAt),end=at(d.votingEndsAt),closed=at(d.closingEndsAt),go=at(d.raceStartsAt);
+  if(now>=end&&!online.applied){
+    if(!state.finalized||!Array.isArray(state.counts)){if(race.state!=='online_wait')enterPhase('online_wait',now);return;}
+    const counts=new Map(state.counts.map(row=>[row.id,row.votes]));
+    if(counts.size!==racers.length||racers.some(item=>!Number.isSafeInteger(counts.get(item.id))||counts.get(item.id)<0)){
+      online.failed=true;onlineError(new Error('確定票の出走者を確認できないよ。'));return;
+    }
+    if(now>go+2000){online.failed=true;enterPhase('online_wait',now);onlineError(new Error('開始時刻を過ぎたため停止したよ。「もう一度」で新しい受付を作ってね。'));retryButton.disabled=false;return;}
+    voting.counts=counts;online.applied=true;enterPhase('closed',end);
+  }
+  let phase,begin,deadline;
+  if(now<prep){phase='preparation';begin=at(state.startedAt);deadline=prep;}
+  else if(now<end){phase='voting';begin=prep;deadline=end;}
+  else if(race.noVotes){return;}
+  else if(now<closed){phase='closed';begin=end;deadline=closed;}
+  else if(now<go){phase='countdown';begin=closed;deadline=go;}
+  else{phase='racing';begin=go;deadline=null;}
+  if(race.state!==phase)enterPhase(phase,begin);
+  race.deadline=deadline;
+}
+document.getElementById('connectVoting').addEventListener('click',async()=>{
+  if(!online.enabled||!racers.length||!['registration','online_wait'].includes(race.state))return;
+  const button=document.getElementById('connectVoting');if(button.disabled)return;button.disabled=true;
+  try{
+    if(online.client&&!online.failed&&online.client.requestId&&!online.snapshot)await online.client.retryCreate();
+    else{
+      const token=document.getElementById('adminToken'),origin=document.getElementById('apiOrigin').value.trim();
+      if(token.value.length<32)throw new Error('管理トークンを入力してね（32文字以上）。');
+      const client=new HostClient(origin,token.value,receiveOnlineState,onlineError);token.value='';
+      online.client?.stop();online.client=client;online.failed=false;await createOnlineRound();
+      if(online.snapshot)document.getElementById('adminPanel').open=false;
+    }
+  }catch(error){onlineError(error);}finally{button.disabled=false;}
+});
+startOnline.addEventListener('click',async()=>{startOnline.disabled=true;try{await online.client?.start();document.getElementById('adminPanel').open=false;}catch(error){onlineError(error);}});
+votingMode.addEventListener('change',()=>{
+  if(!['registration','result','closed','preparation'].includes(race.state)||votingMode.disabled)return;
+  online.client?.stop();online.client=null;online.enabled=votingMode.value==='online';resetRace();
+});
+
 // 進行管理はこの1本。フェーズごとのsetInterval/setTimeoutは作らない。
 function resumeFlow() { updateRace(performance.now(),0); }
 document.addEventListener('visibilitychange',resumeFlow);
@@ -1234,6 +1381,8 @@ async function populateRace() {
   }
 }
 function resize() {
+  const headerBottom=document.querySelector?.('header')?.getBoundingClientRect?.().bottom;
+  document.getElementById('qrPanel').style.top=`${Number.isFinite(headerBottom)?Math.max(58,headerBottom-30):72}px`;
   const width=Math.max(1,viewport.clientWidth),height=Math.max(1,viewport.clientHeight);
   renderer.setSize(width,height);camera.aspect=width/height;camera.updateProjectionMatrix();
   frameCourse();

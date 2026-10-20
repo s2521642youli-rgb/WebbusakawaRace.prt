@@ -55,6 +55,9 @@
     <p class="hint">クリックで名前を表示・地面をクリックで閉じる<br>ドラッグで見回す・スクロールで拡大縮小</p>
   </div>
   <script type="module">
+import {partSettings,partSlots} from './js/parts-config.js';
+import {createModelCache} from './js/model-cache.js';
+import {readPartAdjustment,adjustedPartBounds,applyPartAdjustment} from './js/part-adjustment.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -92,14 +95,7 @@ document.getElementById('resetCharacters').addEventListener('click', () => {
   try { localStorage.removeItem(storageKey); window.location.reload(); }
   catch { status.textContent = '登録データを削除できなかったよ。ブラウザの保存設定を確認してね。'; }
 });
-const partSettings = {
-  eye_01: { path: './assets/eyes/eye_01.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
-  eye_02: { path: './assets/eyes/eye_02.glb', sizeMultiplier: 0.48, fixedDepth: -0.1 },
-  mouth_01: { path: './assets/mouths/mouth_01.glb', sizeMultiplier: 0.55, fixedDepth: -0.1 },
-  mouth_02: { path: './assets/mouths/mouth_02.glb', sizeMultiplier: 1.10, fixedDepth: -0.13, depthLocked: true },
-  mouth_03: { path: './assets/mouths/mouth_03.glb', sizeMultiplier: 0.715, fixedDepth: -0.16, depthLocked: true }
-};
-const partSlots = ['eye_01', 'eye_02', 'mouth_01'];
+
 const pastureCharacters = [];
 let currentBounds;
 
@@ -312,13 +308,7 @@ function readRegisteredCharacters() {
 
 // GLBは種類ごとに1回だけ読み込み、個体は骨を含めて複製する。
 const loader = new GLTFLoader();
-const modelTemplates = new Map();
-function loadTemplate(path) {
-  if (!modelTemplates.has(path)) {
-    modelTemplates.set(path, loader.loadAsync(path).then((gltf) => gltf.scene));
-  }
-  return modelTemplates.get(path);
-}
+const loadTemplate=createModelCache(loader);
 
 // 計算は生成時だけ。制作画面と同じ座標系の中で復元してから個体全体を移動する。
 function createHeadSurface(character) {
@@ -404,12 +394,16 @@ function restorePart(template, saved, surface) {
   group.name = saved.type;
   group.add(part);
   group.updateMatrixWorld(true);
-  const rearDepth = Math.max(0, -new THREE.Box3().setFromObject(group).min.z);
+  const adjustment=readPartAdjustment(saved,settings);
+  const bounds=adjustedPartBounds(new THREE.Box3().setFromObject(group),adjustment.scale,adjustment.tilt);
+  const adjustedSize=bounds.getSize(new THREE.Vector3());
+  const rearDepth = Math.max(0, -bounds.min.z);
   const pose = surface.placement(saved.x, saved.y, saved.rotation,
-    scaledSize.x * 0.5, scaledSize.y * 0.5, rearDepth, settings.depthLocked ? settings.fixedDepth : (Number.isFinite(saved.depth) ? saved.depth : settings.fixedDepth));
+    adjustedSize.x * 0.5, adjustedSize.y * 0.5, rearDepth, settings.depthLocked ? settings.fixedDepth : (Number.isFinite(saved.depth) ? saved.depth : settings.fixedDepth));
   if (!pose) throw new Error(`${saved.type}の保存位置に頭の表面が見つからなかったよ。`);
   group.position.copy(pose.position);
   group.quaternion.copy(pose.quaternion);
+  applyPartAdjustment(group,adjustment.scale,adjustment.tilt);
   return group;
 }
 

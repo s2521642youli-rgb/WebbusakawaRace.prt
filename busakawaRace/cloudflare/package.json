@@ -1,0 +1,14 @@
+{
+  "name": "busakawa-voting",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "npm run build && wrangler dev --ip 127.0.0.1 --port 8787",
+    "test": "vitest run",
+    "setup:local": "node scripts/setup-local.mjs",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {"qrcode": "1.5.4"},
+  "devDependencies": {"wrangler": "4.151.1", "@cloudflare/vitest-plugin": "1.4.4", "vitest": "^4.1.0", "esbuild": "^0.25.0"}
+}

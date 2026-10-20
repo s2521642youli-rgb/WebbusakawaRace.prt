@@ -1,0 +1,3 @@
+# npm run setup:local creates the real, ignored .dev.vars with a random token.
+# Production: npx wrangler secret put ADMIN_TOKEN
+ADMIN_TOKEN=replace-with-a-random-token-at-least-32-characters-long
