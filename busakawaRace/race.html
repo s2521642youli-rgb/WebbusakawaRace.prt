@@ -71,6 +71,7 @@ canvas { display:block; width:100%; height:100%; }
 <a href="./pasture.html">牧場に戻る</a>
 <details id="adminPanel"><summary>管理設定</summary><div class="adminBody">
 <label>投票方式 <select id="votingMode"><option value="online">スマホ投票（Cloudflare）</option><option value="local">PC内投票（テスト用）</option></select></label>
+<label>表示スタイル <select id="visualStyle"><option value="original">Original</option><option value="low-poly">Low Poly</option><option value="painterly-low-poly">Painterly Low Poly</option></select></label>
 <label>ハプニング <select id="incidentMode"><option value="normal">通常（2〜3回）</option><option value="test">演出テスト（3種類）</option></select></label>
 <div id="onlineHost" hidden>
 <label>Workers URL <input id="apiOrigin" type="url" placeholder="https://busakawa-voting.example.workers.dev"></label>
@@ -102,6 +103,7 @@ import {toCanvas} from './cloudflare/public/vendor/qr-code.js';
 import {partSettings,partSlots} from './js/parts-config.js';
 import {createModelCache} from './js/model-cache.js';
 import {readPartAdjustment,adjustedPartBounds,applyPartAdjustment} from './js/part-adjustment.js';
+import {createRaceVisualStyles,raceVisualStyleConfig} from './js/race-visual-style.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -160,7 +162,7 @@ const scene=new THREE.Scene(); scene.background=new THREE.Color(0xdceef3);
 const camera=new THREE.PerspectiveCamera(40,1,.01,1000);
 const renderer=new THREE.WebGLRenderer({antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,2)); viewport.appendChild(renderer.domElement);
-scene.add(new THREE.HemisphereLight(0xffffff,0x888888,2));
+const hemisphereLight=new THREE.HemisphereLight(0xffffff,0x888888,2);scene.add(hemisphereLight);
 const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(3,5,5);scene.add(light);
 const controls=new OrbitControls(camera,renderer.domElement);
 controls.enableDamping=true;controls.maxPolarAngle=Math.PI*.48;
@@ -172,6 +174,9 @@ const race={state:'loading',phaseStartedAt:0,deadline:null,raceStartedAt:null,no
 const course={length:12,lapLength:12,laneWidth:1.6,height:1,halfStraight:3.8,curveRadius:4.8,width:6};
 const trackObjects=new THREE.Group(),backgroundObjects=new THREE.Group();
 scene.add(backgroundObjects,trackObjects);
+const visualStyles=createRaceVisualStyles({scene,hemisphere:hemisphereLight,directional:light});
+document.getElementById('visualStyle').addEventListener('change',event=>{visualStyles.setStyle(event.target.value);if(race.state==='racing')votingPreview.raceView=courseCameraView(false);else if(!['finishing','result'].includes(race.state))frameCourse();});
+window.addEventListener('pagehide',event=>{if(!event.persisted)visualStyles.dispose();});
 let sharedFootContacts;
 const rigContactIndexCache=new WeakMap(), calibratedRigContacts=new WeakMap();
 const organicContactIndexCache=new WeakMap();
@@ -1055,6 +1060,7 @@ function buildCourse(height) {
   const line=new THREE.Mesh(new THREE.PlaneGeometry(height*.09,course.width),new THREE.MeshStandardMaterial({color:0xffffff,roughness:1,polygonOffset:true,polygonOffsetFactor:-4,polygonOffsetUnits:-4,depthTest:true,depthWrite:false}));
   line.rotation.x=-Math.PI/2;line.position.set(0,height*.006,course.curveRadius);line.renderOrder=2;line.name='startGoalLine';trackObjects.add(line);
   const label=makeNameLabel('START / GOAL',height);label.visible=true;label.position.set(-height,height*.45,course.curveRadius+course.width/2+height*.5);trackObjects.add(label);
+  visualStyles.prepare({course,trackObjects,backgroundObjects,racers});
   frameCourse();
 }
 function courseCameraView(votingView,aspect=camera.aspect) {
@@ -1062,6 +1068,14 @@ function courseCameraView(votingView,aspect=camera.aspect) {
   // 投票中は顔を見比べる視点。締め切り後はスタートとゴールを見渡す視点へ戻す。
   const offsets=racers.map(item=>item.homeLateral??0);
   const low=Math.min(0,...offsets),high=Math.max(0,...offsets);
+  const painterly=visualStyles.getStats().mode==='painterly-low-poly';
+  if(painterly&&!votingView&&racers.length){
+    const startBox=new THREE.Box3();
+    for(const item of racers){const p=trackPose(0,item.homeLateral??0);startBox.expandByPoint(new THREE.Vector3(p.x-height*.7,0,p.z-height*.7));startBox.expandByPoint(new THREE.Vector3(p.x+height*.7,height*1.2,p.z+height*.7));}
+    // 全景ではなく出走者の顔と足を優先した低いスタート構図。
+    const view=cameraViewForBox(startBox,startBox.getCenter(new THREE.Vector3()),new THREE.Vector3(1,raceVisualStyleConfig.camera.startElevation,.38).normalize(),aspect,height*4);
+    return {...view,distance:view.position.distanceTo(view.target)};
+  }
   const box=votingView
     ? new THREE.Box3(new THREE.Vector3(-height*.65,height*.03,course.curveRadius+low-height*.72),new THREE.Vector3(height*.65,height*1.18,course.curveRadius+high+height*.72))
     : new THREE.Box3(new THREE.Vector3(-course.halfStraight-course.curveRadius-course.width/2-height,0,-course.curveRadius-course.width/2-height),new THREE.Vector3(course.halfStraight+course.curveRadius+course.width/2+height,height*1.8,course.curveRadius+course.width/2+height));
@@ -1097,7 +1111,26 @@ function updateRaceCamera(now,dt) {
   for(const item of racers){const p=item.group.position;bounds.expandByPoint(new THREE.Vector3(p.x-h*.9,0,p.z-h*.9));bounds.expandByPoint(new THREE.Vector3(p.x+h*.9,h*1.5,p.z+h*.9));}
   const leader=racers.reduce((a,b)=>a.progressDistance>b.progressDistance?a:b);
   const target=bounds.getCenter(new THREE.Vector3()).lerp(leader.group.position.clone().add(new THREE.Vector3(0,h*.65,0)),.2);
-  const desired=cameraViewForBox(bounds,target,new THREE.Vector3(.35,1.15,1).normalize());
+  const painterly=visualStyles.getStats().mode==='painterly-low-poly';
+  let desired;
+  if(painterly){
+    const heading=trackPose(leader.progressDistance).heading;
+    const direction=new THREE.Vector3(Math.sin(heading)+.3,raceVisualStyleConfig.camera.elevation,Math.cos(heading)).normalize();
+    // 全員が広く離れた時にも全周を収めて豆粒にせず、先頭集団を見せる。
+    const focus=target.clone().lerp(leader.group.position.clone().add(new THREE.Vector3(0,h*.65,0)),.55);
+    desired=cameraViewForBox(bounds,focus,direction);
+    const offset=desired.position.clone().sub(focus).clampLength(h*5,h*raceVisualStyleConfig.camera.maxDistance);
+    desired.position.copy(focus).add(offset);
+    // カーブや先頭交代でカメラが集団の中を横切らないよう、位置でなく方位・距離を補間。
+    const current=camera.position.clone().sub(controls.target),alpha=1-Math.exp(-raceVisualStyleConfig.camera.followPerSecond*Math.max(0,dt));
+    const fromYaw=Math.atan2(current.x,current.z),toYaw=Math.atan2(offset.x,offset.z);
+    const yaw=fromYaw+Math.atan2(Math.sin(toYaw-fromYaw),Math.cos(toYaw-fromYaw))*alpha;
+    const elevation=THREE.MathUtils.lerp(Math.atan2(current.y,Math.hypot(current.x,current.z)),Math.atan2(offset.y,Math.hypot(offset.x,offset.z)),alpha);
+    const radius=THREE.MathUtils.lerp(current.length(),offset.length(),alpha);
+    controls.target.lerp(focus,alpha);
+    camera.position.copy(controls.target).add(new THREE.Vector3(Math.sin(yaw)*Math.cos(elevation),Math.sin(elevation),Math.cos(yaw)*Math.cos(elevation)).multiplyScalar(radius));
+    camera.lookAt(controls.target);return;
+  }else desired=cameraViewForBox(bounds,target,new THREE.Vector3(.35,1.15,1).normalize());
   const overview=votingPreview.raceView,blend=previewEase((elapsed-raceCameraConfig.overviewSeconds)/3);
   desired.position.lerpVectors(overview.position,desired.position,blend);desired.target.lerpVectors(overview.target,desired.target,blend);
   const alpha=1-Math.exp(-raceCameraConfig.followPerSecond*Math.max(0,dt));
