@@ -104,6 +104,7 @@ import {partSettings,partSlots} from './js/parts-config.js';
 import {createModelCache} from './js/model-cache.js';
 import {readPartAdjustment,adjustedPartBounds,applyPartAdjustment} from './js/part-adjustment.js';
 import {createRaceVisualStyles,raceVisualStyleConfig} from './js/race-visual-style.js';
+import {captureTokotokoRig,advanceTokotokoPhase,applyTokotokoPose} from './js/tokotoko-motion.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -208,19 +209,21 @@ const walkConfig = {
 // 開発用比較: 'classic' にすると従来の走行。変更後はページを再読み込みする。
 const runMotionConfig = {
   mode: 'organic',
-  stride: 1.18,           // 基本歩幅。大きいほど同じ速度でゆったりした足運び
-  stanceRatio: 0.60,      // 1周期の接地比率（残りが遊脚）。調整範囲0.52〜0.68
-  footLift: 0.022,        // 足を持ち上げる高さ（全高に対する比率）
-  hipSwing: 0.34,         // 前後の振り幅（ラジアン）
-  kneeBend: 0.48,         // 遊脚時の膝の曲がり（ラジアン）
+  cycleDistance: .62,    // 一周期の前進距離（全高比）。大きいほどゆったり走る
+  maxCyclesPerSecond: 2.1, // 足だけ高速でカタカタ動くのを抑える上限
+  footResponseSeconds: .035, // 足先の急な追いつきを数フレームでなじませる
+  maxFootCorrection: .16, // 接地補助で脚付け根を動かす最大距離（全高比）
+  stanceRatio: 0.58,      // 1周期の接地比率（残りが遊脚）。調整範囲0.52〜0.68
+  footLift: 0.043,        // 足を持ち上げる高さ（全高に対する比率）
+  hipSwing: 0.53,         // 前後の振り幅（ラジアン）
+  kneeBend: 0.40,         // 遊脚時の膝の曲がり（ラジアン）
   sway: 0.025,            // 体重移動の左右傾斜（ラジアン）
   lateralShift: 0.008,    // 頭と足をまとめた左右移動（全高比、レーン内のみ）
   forwardLean: 0.035,     // 走行中の前傾（ラジアン）
-  bounce: 0.004,          // 接地補正に加える小さな上下動（全高比）
-  smoothSeconds: 0.10,    // 開始・停止・速度変化のなじみ時間。大きいほど柔らかい
+  bounce: 0.009,          // 接地補正に加える小さな上下動（全高比）
+  smoothSeconds: 0.18,    // 開始・停止・速度変化のなじみ時間。大きいほど柔らかい
   bodyLag: 0.32,          // 足に対する体重移動の位相遅れ（ラジアン）
   individuality: 0.65,    // IDごとの歩幅・足上げ・揺れ・左右差の強さ（0〜1）
-  rhythmVariation: 0.035 // 数歩ごとの控えめな歩幅変動。毎フレームの乱数は使わない
 };
 
 function readRegisteredCharacters() {
@@ -500,6 +503,7 @@ function createLegRig(character, surface) {
   // 生成時に取得済みの足裏候補（前後傾斜も扱うためXY凸包には絞らない）を再利用し、Raycasterや全身の再走査は行わない。
   rig.organicContacts=[];
   for(const mesh of meshes)for(const index of organicContactIndexCache.get(mesh.geometry))rig.organicContacts.push({mesh,index});
+  captureTokotokoRig(rig);
   return rig;
 }
 
@@ -628,11 +632,6 @@ function updateClassicWalkVisual(item, distance, dt) {
 
 // 参考: Three.jsの重みブレンド/時間制御、procedural-spiderの接地/遊脚の分離。
 // クリップのない短足リグへ合わせた独自のプロシージャル制御。外部モーションは使わない。
-const motionEase = t => t*t*t*(t*(t*6-15)+10); // 端で速度・加速度が0になる五次補間
-function motionBump(u) {
-  // 素早く持ち上げ、少し長くかけて下ろす。頂点でも滑らかにつながる。
-  return u<.42 ? motionEase(u/.42) : 1-motionEase((u-.42)/.58);
-}
 function resetRunMotion(item) {
   const feature=salt=>{
     const value=Math.sin(item.id*12.9898+salt*78.233)*43758.5453;
@@ -640,42 +639,14 @@ function resetRunMotion(item) {
   };
   const amount=THREE.MathUtils.clamp(runMotionConfig.individuality,0,1);
   item.runMotion={
-    profile:{stride:1+feature(1)*.16*amount,lift:1+feature(2)*.24*amount,
-      sway:1+feature(3)*.30*amount,bounce:1+feature(4)*.30*amount,
-      asymmetry:feature(5)*.045*amount,offset:feature(6)*Math.PI*amount},
+    profile:{stride:1+feature(1)*.08*amount,lift:1+feature(2)*.24*amount,
+      sway:1+feature(3)*.30*amount,bounce:1+feature(4)*.30*amount},
     phase:item.behavior.phase, speed:0, roll:0, pitch:0, shift:0, bob:0
   };
   item.walkPivot.rotation.set(0,0,0);item.walkPivot.position.set(0,0,0);
 }
 function applyOrganicLegPose(item,weight) {
-  const motion=item.runMotion,config=runMotionConfig,profile=motion.profile;
-  const speedRatio=THREE.MathUtils.clamp(motion.speed/(item.surface.maxSize*.9),0,1.6);
-  const effort=.78+.22*speedRatio;
-  for(let i=0;i<item.legRig.legs.length;i++) {
-    const leg=item.legRig.legs[i],side=i===0?1:-1;
-    const cycle=((motion.phase/(Math.PI*2)+i*.5)%1+1)%1;
-    const stance=THREE.MathUtils.clamp(config.stanceRatio+side*profile.asymmetry*.2,.52,.68);
-    let hip,knee,lift,toe;
-    const amplitude=config.hipSwing*effort*THREE.MathUtils.clamp(config.stride*profile.stride,.65,1.4)*(1+side*profile.asymmetry);
-    if(cycle<stance) {
-      const u=cycle/stance;
-      // 足を前に置き、接地して後ろへ押す。接地の出入りは連続した速度でつなぐ。
-      const push=u-Math.sin(u*Math.PI*2)/(Math.PI*2);
-      hip=amplitude*(push*2-1);
-      knee=.025*Math.sin(Math.PI*u)**2;
-      lift=0;
-      toe=u>.65 ? .055*motionBump((u-.65)/.35) : 0;
-    } else {
-      const u=(cycle-stance)/(1-stance),arc=motionBump(u);
-      hip=amplitude*(1-2*motionEase(u));
-      knee=config.kneeBend*arc*effort;
-      lift=item.surface.maxSize*config.footLift*profile.lift*arc;
-      toe=.045*Math.sin(u*Math.PI*2)*Math.sin(u*Math.PI)**2;
-    }
-    setJointAngle(leg.hip,hip*weight);setJointAngle(leg.knee,knee*weight);
-    setJointAngle(leg.foot,(-hip-knee+toe)*weight);
-    leg.hip.bone.position.copy(leg.restPosition).addScaledVector(leg.up,lift*weight);
-  }
+  applyTokotokoPose(item,item.runMotion,runMotionConfig,weight);
 }
 function updateWalkVisual(item,distance,dt) {
   if(runMotionConfig.mode==='classic' || !item.legRig) {
@@ -689,20 +660,13 @@ function updateWalkVisual(item,distance,dt) {
   motion.speed+=(measuredSpeed-motion.speed)*blend;
   state.weight+=((distance>0?1:0)-state.weight)*blend;
   if(distance===0 && state.weight<.001) { state.weight=0;motion.speed=0; }
-  // 位相は積算し続ける。速度や歩幅が変わっても現在の足の姿勢を飛ばさない。
-  const breathing=1+config.rhythmVariation*Math.sin(motion.phase*.23+profile.offset);
-  // 高速域では歩幅も少し伸ばし、足だけが極端な高速回転にならないようにする。
-  const speedStride=1+.35*THREE.MathUtils.clamp(motion.speed/(item.surface.maxSize*.9)-1,0,1.8);
-  const contactRatio=THREE.MathUtils.clamp(config.stanceRatio,.52,.68);
-  // 接地を長くした分は1周期の距離を短くし、足が地面を押す速度と前進を近づける。
-  const stride=item.legRig.strideLength*Math.max(.6,config.stride)*profile.stride*breathing*speedStride*(.5/contactRatio);
-  motion.phase+=motion.speed*dt/stride*Math.PI*2;
+  // 距離に応じたゆったりした周期。急な速度変化でも位相を飛ばさない。
+  advanceTokotokoPhase(item,motion,config,dt);
   state.phase=motion.phase;
-  applyOrganicLegPose(item,state.weight);
   const lagPhase=motion.phase-config.bodyLag;
   const effort=THREE.MathUtils.clamp(motion.speed/(item.surface.maxSize*.9),0,1.4);
   const roll=-Math.cos(lagPhase)*config.sway*profile.sway*state.weight;
-  const pitch=(config.forwardLean*effort+.008*Math.sin(lagPhase*2))*state.weight;
+  const pitch=(config.forwardLean*effort+.003*Math.sin(lagPhase*2))*state.weight;
   const shift=Math.cos(lagPhase)*config.lateralShift*item.surface.maxSize*profile.sway*state.weight;
   const bob=(.5-.5*Math.cos(lagPhase*2))*config.bounce*item.surface.maxSize*profile.bounce*state.weight;
   // 大きな頭は足の切替へ少し遅れて追従。Bodyボーンは動かさず、顔ごと親を動かす。
@@ -711,7 +675,9 @@ function updateWalkVisual(item,distance,dt) {
   if(state.weight===0) { motion.roll=0;motion.pitch=0;motion.shift=0;motion.bob=0; }
   item.walkPivot.rotation.set(motion.pitch,0,motion.roll);
   item.walkPivot.position.x=motion.shift;
-  item.walkPivot.position.y=rigGroundHeight(item)+motion.bob;
+  item.walkPivot.position.y=0;
+  applyOrganicLegPose(item,state.weight);
+  item.walkPivot.position.y=rigGroundHeight(item);
 }
 
 // 牧場と同じ上限・キー。出走順は選択順（レーン順）を維持する。
@@ -1273,6 +1239,7 @@ function updateRunnerMotion(item,elapsed,span,visualDt) {
   if(item.finishTime===null&&elapsed>=plan.targetTime) {item.finishTime=plan.targetTime;race.finishers.push(item);}
   const dt=span>.2?visualDt:span;
   const distance=span>.2?item.raceSpeed*dt:item.group.position.distanceTo(oldPosition);
+  if(item.runMotion)item.runMotion.suspendPlant=(plan.events??(plan.event?[plan.event]:[])).some(event=>elapsed>=event.start&&elapsed<event.start+event.duration);
   updateWalkVisual(item,distance,dt);applyIncidentVisual(item,plan,elapsed);
 }
 function updateFinishShow(now) {
